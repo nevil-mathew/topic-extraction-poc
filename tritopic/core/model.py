@@ -291,7 +291,8 @@ class TriTopic:
         if self.config.verbose:
             print(f"[TriTopic] Fitting model on {n_docs} documents")
             print(f"   Config: {self.config.graph_type} graph, "
-                  f"{'iterative' if self.config.use_iterative_refinement else 'single-pass'} mode")
+                  f"{'iterative' if self.config.use_iterative_refinement else 'single-pass'} mode"
+                  f"{', low_memory=True' if self.config.low_memory else ''}")
         
         # Step 1: Generate embeddings
         if embeddings is not None:
