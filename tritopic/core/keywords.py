@@ -183,15 +183,12 @@ class KeywordExtractor:
         for i, doc in enumerate(all_docs):
             if doc in topic_docs:
                 topic_doc_set.add(i)
-        # More reliable: use positional matching
-        n_all = len(all_docs)
-        n_topic = len(topic_docs)
 
         word_scores = {}
         for word, freq in topic_vocab.items():
             scores = bm25.get_scores([word])
             # Compare: average score within topic vs. rest of corpus
-            topic_avg = np.mean([scores[i] for i in range(n_all) if i < n_topic]) if n_topic > 0 else 0
+            topic_avg = np.mean([scores[i] for i in topic_doc_set]) if topic_doc_set else 0
             corpus_avg = np.mean(scores) + 1e-10
             # Topic-specificity: ratio of in-topic relevance to corpus average
             specificity = (topic_avg / corpus_avg) * np.log1p(freq)
