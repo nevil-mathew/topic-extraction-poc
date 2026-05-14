@@ -10,8 +10,9 @@ Generate human-readable topic labels using LLMs:
 
 from __future__ import annotations
 
-from typing import Literal
 import json
+import time
+from typing import Literal
 
 
 class LLMLabeler:
@@ -107,6 +108,16 @@ class LLMLabeler:
                     "Install with: pip install openai"
                 )
     
+    def _call_with_retry(self, fn):
+        """Call fn() up to 3 times with exponential backoff on transient errors."""
+        for attempt in range(3):
+            try:
+                return fn()
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                time.sleep(2 ** attempt)
+
     def generate_label(
         self,
         keywords: list[str],
@@ -139,14 +150,14 @@ class LLMLabeler:
             keywords, representative_docs, domain_hint
         )
 
-        # Call API with error handling
+        # Call API with retry + error handling
         try:
             if self.provider == "anthropic":
-                response = self._call_anthropic(system_prompt, user_prompt)
+                response = self._call_with_retry(lambda: self._call_anthropic(system_prompt, user_prompt))
             elif self.provider == "google":
-                response = self._call_google(system_prompt, user_prompt)
+                response = self._call_with_retry(lambda: self._call_google(system_prompt, user_prompt))
             else:
-                response = self._call_openai(system_prompt, user_prompt)
+                response = self._call_with_retry(lambda: self._call_openai(system_prompt, user_prompt))
         except Exception as e:
             # Fallback to keyword-based label on API error
             import warnings
