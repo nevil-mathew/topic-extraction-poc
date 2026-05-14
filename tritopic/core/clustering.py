@@ -10,6 +10,7 @@ Robust community detection with:
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -218,7 +219,8 @@ class ConsensusLeiden:
                 if avg_ari > best_score:
                     best_score = avg_ari
                     best_labels = labels
-            except Exception:
+            except Exception as e:
+                warnings.warn(f"Consensus partition failed for n_clusters={n_clusters}: {e}")
                 continue
 
         if best_labels is None:

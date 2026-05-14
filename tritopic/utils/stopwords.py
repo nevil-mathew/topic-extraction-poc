@@ -8,6 +8,8 @@ Supports English, German, French, Spanish, and multilingual mode.
 
 from __future__ import annotations
 
+import warnings
+
 
 # Minimal built-in stopword lists (no external dependency required).
 # These cover the most frequent function words for each language.
@@ -138,8 +140,8 @@ def get_stopwords(language: str) -> str | list[str] | None:
     try:
         from nltk.corpus import stopwords as nltk_sw
         return nltk_sw.words(lang)
-    except Exception:
-        pass
+    except Exception as e:
+        warnings.warn(f"Could not load NLTK stopwords for '{lang}': {e}. Using empty list.")
 
     return None
 
@@ -166,7 +168,7 @@ def get_stopwords_set(language: str) -> set[str]:
     try:
         from nltk.corpus import stopwords as nltk_sw
         return set(nltk_sw.words(lang))
-    except Exception:
-        pass
+    except Exception as e:
+        warnings.warn(f"Could not load NLTK stopwords for '{lang}': {e}. Using empty set.")
 
     return set()
