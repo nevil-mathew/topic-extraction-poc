@@ -247,7 +247,7 @@ Respond ONLY with this exact JSON format, no other text:
         return response.choices[0].message.content
 
     def _call_google(self, system_prompt: str, user_prompt: str) -> str:
-        """Call Google Gemini API via google-genai."""
+        """Call Google Gemini API via google-genai with structured JSON output."""
         from google.genai import types
         response = self._client.models.generate_content(
             model=self.model,
@@ -256,6 +256,15 @@ Respond ONLY with this exact JSON format, no other text:
                 system_instruction=system_prompt,
                 temperature=self.temperature,
                 max_output_tokens=self.max_tokens,
+                response_mime_type="application/json",
+                response_schema=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "label": types.Schema(type=types.Type.STRING),
+                        "description": types.Schema(type=types.Type.STRING),
+                    },
+                    required=["label", "description"],
+                ),
             ),
         )
         return response.text
