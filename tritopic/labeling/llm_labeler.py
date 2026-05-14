@@ -35,6 +35,10 @@ class LLMLabeler:
         Sampling temperature. Default: 0.3
     language : str
         Output language. Default: "english"
+    n_docs : int
+        Number of representative documents included in the LLM prompt. Default: 5
+    doc_max_chars : int
+        Maximum characters per document before truncation. Default: 500
     """
     
     def __init__(
@@ -46,6 +50,8 @@ class LLMLabeler:
         temperature: float = 0.3,
         language: str = "english",
         domain_hint: str | None = None,
+        n_docs: int = 5,
+        doc_max_chars: int = 500,
     ):
         self.provider = provider
         self.api_key = api_key
@@ -54,6 +60,8 @@ class LLMLabeler:
         self.temperature = temperature
         self.language = language
         self.domain_hint = domain_hint
+        self.n_docs = n_docs
+        self.doc_max_chars = doc_max_chars
 
         self._client = None
     
@@ -62,7 +70,7 @@ class LLMLabeler:
         if self.provider == "anthropic":
             return "claude-haiku-4-5-20251001"
         elif self.provider == "google":
-            return "gemini-2.0-flash"
+            return "gemini-2.5-flash"
         else:
             return "gpt-4o-mini"
     
@@ -168,8 +176,8 @@ class LLMLabeler:
         """
         # Truncate long documents
         docs_text = ""
-        for i, doc in enumerate(representative_docs[:5], 1):
-            truncated = doc[:500] + "..." if len(doc) > 500 else doc
+        for i, doc in enumerate(representative_docs[:self.n_docs], 1):
+            truncated = doc[:self.doc_max_chars] + "..." if len(doc) > self.doc_max_chars else doc
             docs_text += f"\nDocument {i}: {truncated}\n"
 
         hint = domain_hint or self.domain_hint
