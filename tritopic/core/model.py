@@ -1526,7 +1526,7 @@ class TriTopic:
                 continue
             
             # Get representative docs
-            rep_docs = self.get_representative_docs(topic_id, n_docs=5)
+            rep_docs = self.get_representative_docs(topic_id, n_docs=labeler.n_docs)
             doc_texts = [doc for _, doc in rep_docs]
             
             # Generate label
