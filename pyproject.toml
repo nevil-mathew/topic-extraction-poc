@@ -76,10 +76,12 @@ dependencies = [
 llm = [
     "anthropic>=0.18.0",
     "openai>=1.0.0",
+    "google-genai>=1.0.0",
 ]
 full = [
     "anthropic>=0.18.0",
     "openai>=1.0.0",
+    "google-genai>=1.0.0",
     "pacmap>=0.6.0",
     "datamapplot>=0.1.0",
 ]

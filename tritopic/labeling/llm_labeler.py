@@ -5,6 +5,7 @@ LLM-based Topic Labeling
 Generate human-readable topic labels using LLMs:
 - Claude (Anthropic)
 - GPT-4 (OpenAI)
+- Gemini (Google)
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ class LLMLabeler:
     Parameters
     ----------
     provider : str
-        LLM provider: "anthropic" or "openai"
+        LLM provider: "anthropic", "openai", or "google"
     api_key : str
         API key for the provider.
     model : str, optional
@@ -38,7 +39,7 @@ class LLMLabeler:
     
     def __init__(
         self,
-        provider: Literal["anthropic", "openai"] = "anthropic",
+        provider: Literal["anthropic", "openai", "google"] = "anthropic",
         api_key: str | None = None,
         model: str | None = None,
         max_tokens: int = 500,
@@ -60,6 +61,8 @@ class LLMLabeler:
         """Get default model for provider."""
         if self.provider == "anthropic":
             return "claude-haiku-4-5-20251001"
+        elif self.provider == "google":
+            return "gemini-2.0-flash"
         else:
             return "gpt-4o-mini"
     
@@ -76,6 +79,15 @@ class LLMLabeler:
                 raise ImportError(
                     "anthropic package not installed. "
                     "Install with: pip install anthropic"
+                )
+        elif self.provider == "google":
+            try:
+                from google import genai
+                self._client = genai.Client(api_key=self.api_key)
+            except ImportError:
+                raise ImportError(
+                    "google-genai package not installed. "
+                    "Install with: pip install google-genai"
                 )
         else:
             try:
@@ -123,6 +135,8 @@ class LLMLabeler:
         try:
             if self.provider == "anthropic":
                 response = self._call_anthropic(system_prompt, user_prompt)
+            elif self.provider == "google":
+                response = self._call_google(system_prompt, user_prompt)
             else:
                 response = self._call_openai(system_prompt, user_prompt)
         except Exception as e:
@@ -212,7 +226,21 @@ Respond ONLY with this exact JSON format, no other text:
             ],
         )
         return response.choices[0].message.content
-    
+
+    def _call_google(self, system_prompt: str, user_prompt: str) -> str:
+        """Call Google Gemini API via google-genai."""
+        from google.genai import types
+        response = self._client.models.generate_content(
+            model=self.model,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=self.temperature,
+                max_output_tokens=self.max_tokens,
+            ),
+        )
+        return response.text
+
     def _parse_response(self, response: str) -> tuple[str, str]:
         """Parse LLM response to extract label and description."""
         import re
