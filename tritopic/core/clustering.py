@@ -163,17 +163,20 @@ class ConsensusLeiden:
 
             # Default 1.0 = max distance for pairs that never co-clustered
             # in any of n_runs partitions.
+            # float64 (not float32): scipy.linkage calls _convert_to_double on
+            # non-float64 input, creating a hidden copy that doubles peak RAM.
+            # float64 from the start lets scipy reuse the array in-place.
             n_pairs = n_nodes * (n_nodes - 1) // 2
-            condensed = np.ones(n_pairs, dtype=np.float32)
+            condensed = np.ones(n_pairs, dtype=np.float64)
 
             # Upper triangle only.  Condensed index for (i,j) with i<j is
             # i*n - i*(i+1)/2 + (j-i-1), matching scipy.squareform's layout.
             mask = coo.row < coo.col
             i = coo.row[mask].astype(np.int64)
             j = coo.col[mask].astype(np.int64)
-            v = coo.data[mask].astype(np.float32) / np.float32(n_runs)
+            v = coo.data[mask].astype(np.float64) / float(n_runs)
             idx = n_nodes * i - i * (i + 1) // 2 + (j - i - 1)
-            condensed[idx] = np.float32(1.0) - v
+            condensed[idx] = 1.0 - v
             np.clip(condensed, 0.0, 1.0, out=condensed)
 
             # Free sparse workspace before linkage allocates its own.
