@@ -1,4 +1,4 @@
-# TriTopic 2.2.1
+# TriTopic 2.3.0
 
 **Tri-Modal Graph Topic Modeling with Iterative Refinement**
 
@@ -21,6 +21,8 @@ A state-of-the-art topic modeling library that fuses semantic embeddings, lexica
 - [Quick Start](#quick-start)
 - [The Pipeline](#the-pipeline)
 - [Configuration Reference](#configuration-reference)
+- [Memory Optimization for Large Datasets](#memory-optimization-for-large-datasets)
+- [Troubleshooting](#troubleshooting)
 - [Dimensionality Reduction](#dimensionality-reduction)
 - [Soft Topic Assignments](#soft-topic-assignments)
 - [Outlier Reduction](#outlier-reduction)
@@ -68,8 +70,9 @@ On top of this multi-view graph, TriTopic applies **consensus Leiden clustering*
 | **Post-fit outlier reduction** | Reassigns outlier documents using centroid similarity or neighbor voting after the model is fitted |
 | **Hierarchical topic merging** | Iteratively merges the most similar topic pairs to reach a target count, or manually merges specific topics |
 | **Multiple keyword methods** | c-TF-IDF, BM25, and KeyBERT keyword extraction with automatic diversity |
-| **LLM-powered labels** | Generates human-readable topic names via Claude or GPT-4 |
-| **Interactive visualizations** | 2D document maps, keyword bar charts, dendrograms, similarity heatmaps, and temporal topic evolution via Plotly |
+| **LLM-powered labels** | Generates human-readable topic names via Claude, GPT-4, or Gemini |
+| **Interactive visualizations** | 2D and 3D document maps, keyword bar charts, dendrograms, similarity heatmaps, and temporal topic evolution via Plotly |
+| **TensorFlow Projector export** | Export embeddings and topic metadata for [projector.tensorflow.org](https://projector.tensorflow.org) with one call |
 | **scikit-learn compatible** | Familiar `fit()` / `transform()` / `fit_transform()` API |
 | **Save and load** | Full model persistence including fitted reducer, probabilities, and graph state |
 
@@ -81,7 +84,7 @@ On top of this multi-view graph, TriTopic applies **consensus Leiden clustering*
 # Core installation
 pip install tritopic
 
-# With LLM labeling support (Claude / GPT-4)
+# With LLM labeling support (Claude / GPT-4 / Gemini)
 pip install tritopic[llm]
 
 # Full installation (all optional features)
@@ -100,7 +103,7 @@ pip install -e ".[dev]"
 
 **Core:** numpy, pandas, scipy, scikit-learn, sentence-transformers, leidenalg, igraph, umap-learn, hdbscan, plotly, tqdm, rank-bm25, keybert
 
-**Optional:** anthropic, openai (for LLM labeling), pacmap, datamapplot (for advanced visualizations)
+**Optional:** anthropic, openai, google-genai (for LLM labeling), pacmap, datamapplot (for advanced visualizations)
 
 **Python:** 3.9, 3.10, 3.11, 3.12, 3.13
 
@@ -304,6 +307,7 @@ config = TriTopicConfig(
     # --- Misc ---
     random_state=42,
     verbose=True,
+    low_memory=False,                      # see "Memory Optimization" section
 )
 
 model = TriTopic(config=config)
@@ -329,6 +333,133 @@ model.config.use_dim_reduction = False       # disable dim reduction
 model.config.graph_type = "snn"              # use pure SNN graph
 model.config.keyword_method = "bm25"         # switch keyword method
 ```
+
+---
+
+## Memory Optimization for Large Datasets
+
+If you have a lot of documents (think **20,000+**) and your machine crashes with an "out of memory" error -- usually right after the message `Iteration 1...` -- this section is for you.
+
+### What is the problem?
+
+To find stable topics, TriTopic runs the Leiden clustering algorithm many times (10 by default) and then asks: *"How often did each pair of documents end up in the same cluster?"* This pairwise tally is called a **co-occurrence matrix**.
+
+The size of that matrix grows with the **square** of the number of documents (N x N):
+
+| Documents (N) | Matrix cells | Memory (default mode) |
+|---|---|---|
+| 5,000 | 25 million | ~0.6 GB |
+| 20,000 | 400 million | ~10 GB |
+| 50,000 | 2.5 billion | **~60 GB** |
+| 100,000 | 10 billion | **~240 GB** (will not fit on most machines) |
+
+The default mode builds this matrix as a dense block in memory. That is fine for small corpora and is the fastest approach, but it does not scale.
+
+### What does `low_memory=True` do?
+
+It changes **how** the same computation is done, not **what** is computed. The math, the random seeds, and the final topics are the same. Only the storage format changes:
+
+- Instead of a dense N x N matrix (mostly zeros for big corpora anyway), it keeps the data in a **sparse** format that only stores the non-zero pairs.
+- It also **caches the lexical (TF-IDF) graph** across iterative-refinement iterations. That graph never changes between iterations, so recomputing it every round was wasted work.
+
+Concretely, peak RAM during the heaviest step drops by roughly **7-20x** at large N, with no measurable change in clustering quality.
+
+### When should I use it?
+
+| Situation | Recommendation |
+|---|---|
+| < 10,000 documents | Leave `low_memory=False` (default). Fastest path. |
+| 10,000 - 30,000 documents | Optional. Helps if RAM is tight. |
+| 30,000+ documents | **Strongly recommended.** |
+| You hit an OOM crash at "Iteration 1..." | **Turn it on.** This is exactly the problem it solves. |
+
+### How do I turn it on?
+
+```python
+from tritopic import TriTopic, TriTopicConfig
+
+config = TriTopicConfig(
+    low_memory=True,             # <-- the only change
+    use_iterative_refinement=True,
+)
+model = TriTopic(config=config)
+model.fit(documents)
+```
+
+Or as a constructor override:
+
+```python
+model = TriTopic(low_memory=True, verbose=True)
+model.fit(documents)
+```
+
+### Will my topics change?
+
+**No.** With the same `random_state`, you get the same clusters. The values stored in the co-occurrence matrix are simple fractions like `0/10, 1/10, 2/10, ..., 10/10` (because there are 10 consensus runs by default). These values are represented exactly in the lower-precision format used by `low_memory` mode, so there is no rounding error that could nudge a document into a different cluster.
+
+### Still running out of memory?
+
+If you turn on `low_memory=True` and the job *still* crashes, you have hit a scale where additional knobs help. These do involve a small quality tradeoff -- pick whichever you can afford:
+
+```python
+config = TriTopicConfig(
+    low_memory=True,
+    max_iterations=2,            # was 5. Refinement gains are mostly in rounds 1-2 anyway.
+    n_consensus_runs=5,          # was 10. Slightly less stable, ~1% NMI drop.
+    convergence_threshold=0.90,  # was 0.95. Stops one iteration sooner.
+)
+```
+
+Combined, these typically give an additional 2-3x memory headroom with under 2% quality loss.
+
+---
+
+## Troubleshooting
+
+### "Spectral initialisation failed! ... Falling back to random initialisation!"
+
+You may see this `UserWarning` from UMAP during fitting:
+
+```
+UserWarning: Spectral initialisation failed! The eigenvector solver failed.
+This is likely due to too small an eigengap.
+Consider adding some noise or jitter to your data.
+Falling back to random initialisation!
+```
+
+**What it means (plain English):** UMAP -- the tool that shrinks your high-dimensional embeddings to ~10 dimensions -- normally starts by computing a smart initial placement using linear algebra ("spectral initialisation"). That math is unstable when your documents are very tightly packed or have lots of near-duplicates. When it fails, UMAP automatically falls back to placing points randomly and then optimizing from there.
+
+**Does it affect my topics?** No. The fallback (random init + UMAP optimization) converges to essentially the same embedding. Your clustering quality is unaffected. The warning is informational, not an error.
+
+**Is reproducibility affected?** No, as long as you set `random_state` in your config. Same seed, same output.
+
+**Can I silence the warning?**
+
+```python
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="Spectral initialisation failed",
+)
+```
+
+**Common causes (none are bugs):**
+- Many near-duplicate documents in the corpus
+- Very tightly clustered embeddings (a corpus on one narrow topic)
+- Very small datasets where the graph is fully connected
+
+You can ignore the warning and use the resulting model normally.
+
+### Other common issues
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Crash at `Iteration 1...` with no traceback | Out of memory in consensus step | Set `low_memory=True` (see [section above](#memory-optimization-for-large-datasets)) |
+| `ImportError: cannot import name '...' from 'transformers'` in Colab | Colab silently upgraded torch/transformers mid-session | **Runtime -> Restart session**, then rerun |
+| Too many tiny topics | `resolution` too high or `min_cluster_size` too low | Lower `resolution` (e.g. 0.8) or raise `min_cluster_size` |
+| Too few large topics | `resolution` too low | Raise `resolution` (e.g. 1.3) or set `n_topics_target=N` |
+| 30%+ outliers | HDBSCAN-like over-pruning of small clusters | Call `model.reduce_outliers(strategy="embeddings")` after fit |
+| LLM labels are empty / generic | API call failed silently in earlier versions | v2.3.0+ retries with backoff; check API key and rate limits |
 
 ---
 
@@ -518,7 +649,7 @@ for idx, text in docs:
 
 ## LLM-Powered Labels
 
-Generate human-readable topic names using Claude or GPT-4.
+Generate human-readable topic names using Claude, GPT-4, or Gemini.
 
 ### With Claude (Anthropic)
 
@@ -531,9 +662,9 @@ model.fit(documents)
 labeler = LLMLabeler(
     provider="anthropic",
     api_key="sk-ant-...",
-    model="claude-3-haiku-20240307",   # fast and cheap
-    language="english",                 # output language
-    domain_hint="technology news",      # optional domain context
+    model="claude-haiku-4-5-20251001",  # fast and cheap
+    language="english",                  # output language
+    domain_hint="technology news",       # optional domain context
 )
 model.generate_labels(labeler)
 
@@ -554,6 +685,52 @@ labeler = LLMLabeler(
 model.generate_labels(labeler)
 ```
 
+### With Gemini (Google)
+
+```python
+labeler = LLMLabeler(
+    provider="google",
+    api_key="...",
+    model="gemini-2.5-flash",   # default if model omitted
+)
+model.generate_labels(labeler)
+```
+
+Install the required extra: `pip install tritopic[llm]` (includes all three providers).
+
+### Controlling prompt size
+
+By default each LLM call receives up to **5 representative documents**, each truncated to **500 characters**. Both limits are configurable:
+
+```python
+labeler = LLMLabeler(
+    provider="anthropic",
+    api_key="...",
+    n_docs=3,           # fewer docs → lower cost / latency
+    doc_max_chars=200,  # shorter snippets
+)
+
+# Higher quality: more context per topic
+labeler = LLMLabeler(
+    provider="anthropic",
+    api_key="...",
+    n_docs=8,
+    doc_max_chars=1000,
+)
+```
+
+> **Note:** `n_docs` draws from the representative documents stored at fit time, which are the docs closest to the topic centroid. If you set `n_docs` higher than `TriTopicConfig.n_representative_docs` (default 5), raise that value too:
+>
+> ```python
+> from tritopic import TriTopic, TriTopicConfig
+> config = TriTopicConfig(n_representative_docs=10)
+> model = TriTopic(config=config)
+> model.fit(documents)
+>
+> labeler = LLMLabeler(provider="anthropic", api_key="...", n_docs=8)
+> model.generate_labels(labeler)
+> ```
+
 ### Simple labeler (no API needed)
 
 ```python
@@ -570,7 +747,7 @@ model.generate_labels(labeler)
 model.generate_labels(labeler, topics=[0, 3, 5])
 ```
 
-If the LLM API call fails, the labeler falls back to a keyword-based label automatically.
+If the LLM API call fails, the labeler automatically falls back to a keyword-based label (with exponential-backoff retry before giving up).
 
 ---
 
@@ -578,7 +755,7 @@ If the LLM API call fails, the labeler falls back to a keyword-based label autom
 
 All visualizations return interactive Plotly figures.
 
-### Document map
+### Document map (2D)
 
 2D scatter plot where each point is a document, colored by topic:
 
@@ -587,6 +764,51 @@ fig = model.visualize(method="umap", show_outliers=True)
 fig.show()
 fig.write_html("document_map.html")
 ```
+
+### Document map (3D)
+
+Fully interactive 3D scatter — rotate, zoom, and hover for topic labels and document snippets:
+
+```python
+fig = model.visualize_3d()          # UMAP 3D (default)
+fig = model.visualize_3d(method="pacmap")
+fig = model.visualize_3d(show_outliers=False)
+fig.show()
+fig.write_html("document_map_3d.html")
+```
+
+### TensorFlow Embedding Projector export
+
+Export to [projector.tensorflow.org](https://projector.tensorflow.org) for interactive PCA / UMAP / t-SNE exploration in the browser, with topics visible as color labels:
+
+```python
+# Recommended: export raw embeddings so the projector can apply its own reduction
+vectors_path, metadata_path = model.export_projector("projector_export")
+
+# Or export pre-reduced coordinates directly
+vectors_path, metadata_path = model.export_projector("projector_export", embeddings="2d")
+vectors_path, metadata_path = model.export_projector("projector_export", embeddings="3d")
+```
+
+This writes two TSV files:
+
+- `vectors.tsv` — one document per row, tab-separated floats
+- `metadata.tsv` — `topic_id`, `topic_label`, top-5 `keywords`, and a 150-character document snippet per row
+
+**To load in the projector:**
+1. Go to [projector.tensorflow.org](https://projector.tensorflow.org) and click **Load**
+2. Upload `vectors.tsv` as the tensor file
+3. Upload `metadata.tsv` as the metadata file
+4. Use **Color by → topic_label** to colour points by topic
+
+The `embeddings` parameter accepts:
+
+| Value | Description |
+|---|---|
+| `"original"` (default) | Raw embeddings — lets the projector apply PCA/UMAP/t-SNE interactively |
+| `"reduced"` | Clustering-space reduced embeddings (`reduced_embeddings_`) |
+| `"2d"` | Fresh UMAP/PaCMAP projection to 2D |
+| `"3d"` | Fresh UMAP/PaCMAP projection to 3D |
 
 ### Topic keywords
 
@@ -846,6 +1068,8 @@ The main model class. Follows the scikit-learn fit/transform pattern.
 | `generate_labels(labeler, topics?)` | Generate LLM labels for topics. |
 | `evaluate()` | Compute coherence, diversity, stability, and outlier ratio. |
 | `visualize(method?, show_outliers?, ...)` | 2D document scatter plot. |
+| `visualize_3d(method?, show_outliers?, ...)` | Interactive 3D document scatter plot. |
+| `export_projector(output_dir?, embeddings?)` | Export `vectors.tsv` + `metadata.tsv` for [projector.tensorflow.org](https://projector.tensorflow.org). Returns `(vectors_path, metadata_path)`. |
 | `visualize_topics(n_keywords?, ...)` | Keyword bar charts per topic. |
 | `visualize_hierarchy(...)` | Topic dendrogram. |
 | `save(path)` | Pickle model to disk (includes all state, reducer, probabilities). |
