@@ -1587,6 +1587,45 @@ class TriTopic:
             **kwargs,
         )
     
+    def visualize_3d(
+        self,
+        method: Literal["umap", "pacmap"] = "umap",
+        show_outliers: bool = True,
+        **kwargs,
+    ):
+        """
+        Visualize topics in 3D.
+
+        Parameters
+        ----------
+        method : str
+            Dimensionality reduction method. "umap" or "pacmap".
+        show_outliers : bool
+            Whether to show outlier documents.
+        **kwargs
+            Additional arguments passed to :meth:`TopicVisualizer.plot_documents_3d`.
+
+        Returns
+        -------
+        fig : plotly.graph_objects.Figure
+            Interactive 3-D visualization.
+        """
+        from tritopic.visualization.plotter import TopicVisualizer
+
+        if not self._is_fitted:
+            raise ValueError("Model not fitted. Call fit() first.")
+
+        visualizer = TopicVisualizer(method=method)
+
+        return visualizer.plot_documents_3d(
+            embeddings=self.embeddings_,
+            labels=self.labels_,
+            documents=self.documents_,
+            topics=self.topics_,
+            show_outliers=show_outliers,
+            **kwargs,
+        )
+
     def visualize_hierarchy(self, **kwargs):
         """Visualize topic hierarchy as a dendrogram."""
         from tritopic.visualization.plotter import TopicVisualizer
@@ -1614,6 +1653,86 @@ class TriTopic:
             **kwargs,
         )
     
+    def export_projector(
+        self,
+        output_dir: str = ".",
+        embeddings: Literal["original", "reduced", "2d", "3d"] = "original",
+    ) -> tuple[str, str]:
+        """
+        Export document embeddings and metadata for the TensorFlow Embedding Projector
+        (https://projector.tensorflow.org).
+
+        Writes two TSV files to ``output_dir``:
+
+        * ``vectors.tsv``  – one document per row, tab-separated floats.
+        * ``metadata.tsv`` – topic_id, topic_label, keywords, document snippet.
+
+        Parameters
+        ----------
+        output_dir : str
+            Directory to write the TSV files into. Created if it does not exist.
+        embeddings : {"original", "reduced", "2d", "3d"}
+            Which vectors to export.
+
+            * ``"original"`` – raw high-dimensional embeddings (recommended; lets
+              the projector apply PCA / UMAP / t-SNE interactively).
+            * ``"reduced"``  – clustering-space reduced embeddings
+              (``reduced_embeddings_``).
+            * ``"2d"`` / ``"3d"`` – a fresh UMAP projection to 2-D or 3-D
+              (same settings as :meth:`visualize`).
+
+        Returns
+        -------
+        vectors_path, metadata_path : tuple[str, str]
+            Absolute paths of the two written files.
+        """
+        import os
+
+        if not self._is_fitted:
+            raise ValueError("Model not fitted. Call fit() first.")
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # --- choose vectors ---
+        if embeddings == "original":
+            vecs = self.embeddings_
+        elif embeddings == "reduced":
+            if self.reduced_embeddings_ is None:
+                raise ValueError("reduced_embeddings_ not available.")
+            vecs = self.reduced_embeddings_
+        elif embeddings in ("2d", "3d"):
+            n_components = 2 if embeddings == "2d" else 3
+            from tritopic.visualization.plotter import TopicVisualizer
+            viz = TopicVisualizer(method=self.config.dim_reduction_method)
+            vecs = viz._reduce_dimensions(self.embeddings_, n_components=n_components)
+        else:
+            raise ValueError(f"Unknown embeddings value: {embeddings!r}")
+
+        # --- vectors.tsv ---
+        vectors_path = os.path.abspath(os.path.join(output_dir, "vectors.tsv"))
+        np.savetxt(vectors_path, vecs, delimiter="\t")
+
+        # --- metadata.tsv ---
+        topic_map = {t.topic_id: t for t in self.topics_}
+        metadata_path = os.path.abspath(os.path.join(output_dir, "metadata.tsv"))
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            f.write("topic_id\ttopic_label\tkeywords\tdocument\n")
+            for i, doc in enumerate(self.documents_):
+                tid = int(self.labels_[i])
+                topic = topic_map.get(tid)
+                label = topic.label if topic and topic.label else ("Outlier" if tid == -1 else str(tid))
+                keywords = ", ".join(topic.keywords[:5]) if topic else ""
+                snippet = doc[:150].replace("\t", " ").replace("\n", " ")
+                f.write(f"{tid}\t{label}\t{keywords}\t{snippet}\n")
+
+        if self.config.verbose:
+            print(f"\n[Projector] Exported {len(self.documents_)} documents")
+            print(f"   vectors  → {vectors_path}")
+            print(f"   metadata → {metadata_path}")
+            print("   Load both files at https://projector.tensorflow.org")
+
+        return vectors_path, metadata_path
+
     def evaluate(self) -> dict[str, float]:
         """
         Evaluate topic model quality.

@@ -217,6 +217,129 @@ class TopicVisualizer:
         
         return fig
     
+    def plot_documents_3d(
+        self,
+        embeddings: np.ndarray,
+        labels: np.ndarray,
+        documents: list[str] | None = None,
+        topics: list | None = None,
+        show_outliers: bool = True,
+        title: str = "Topic Document Map (3D)",
+        width: int = 900,
+        height: int = 700,
+    ) -> go.Figure:
+        """
+        Plot documents in 3D space colored by topic.
+
+        Parameters
+        ----------
+        embeddings : np.ndarray
+            Document embeddings.
+        labels : np.ndarray
+            Topic assignments.
+        documents : list[str], optional
+            Document texts for hover info.
+        topics : list[TopicInfo], optional
+            Topic info for labels.
+        show_outliers : bool
+            Whether to show outlier documents.
+        title : str
+            Plot title.
+        width, height : int
+            Figure dimensions.
+
+        Returns
+        -------
+        fig : go.Figure
+            Interactive 3-D Plotly figure.
+        """
+        coords = self._reduce_dimensions(embeddings, n_components=3)
+
+        mask = np.ones(len(labels), dtype=bool)
+        if not show_outliers:
+            mask = labels != -1
+
+        x = coords[mask, 0]
+        y = coords[mask, 1]
+        z = coords[mask, 2]
+        topic_labels = labels[mask]
+
+        if documents:
+            hover_texts = []
+            for idx in np.where(mask)[0]:
+                doc = documents[idx]
+                if len(doc) > 200:
+                    doc = doc[:200] + "..."
+                topic_id = labels[idx]
+                topic_name = f"Topic {topic_id}"
+                if topics:
+                    for t in topics:
+                        if t.topic_id == topic_id:
+                            topic_name = t.label or f"Topic {topic_id}"
+                            break
+                hover_texts.append(f"<b>{topic_name}</b><br>{doc}")
+        else:
+            hover_texts = [f"Topic {l}" for l in topic_labels]
+
+        unique_labels = sorted(np.unique(topic_labels))
+        colors = px.colors.qualitative.Set2 + px.colors.qualitative.Set3
+        color_map = {}
+        color_idx = 0
+        for label in unique_labels:
+            if label == -1:
+                color_map[-1] = "lightgray"
+            else:
+                color_map[label] = colors[color_idx % len(colors)]
+                color_idx += 1
+
+        fig = go.Figure()
+
+        for label in unique_labels:
+            topic_mask = topic_labels == label
+            topic_name = "Outliers" if label == -1 else f"Topic {label}"
+            if topics:
+                for t in topics:
+                    if t.topic_id == label:
+                        topic_name = t.label or f"Topic {label}"
+                        break
+
+            fig.add_trace(go.Scatter3d(
+                x=x[topic_mask],
+                y=y[topic_mask],
+                z=z[topic_mask],
+                mode="markers",
+                name=topic_name,
+                marker=dict(
+                    color=color_map[label],
+                    size=4 if label != -1 else 2,
+                    opacity=0.7 if label != -1 else 0.3,
+                ),
+                text=[hover_texts[i] for i in np.where(topic_mask)[0]],
+                hovertemplate="%{text}<extra></extra>",
+            ))
+
+        method = self.method.upper()
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16)),
+            width=width,
+            height=height,
+            scene=dict(
+                xaxis_title=f"{method} 1",
+                yaxis_title=f"{method} 2",
+                zaxis_title=f"{method} 3",
+            ),
+            legend=dict(
+                orientation="v",
+                yanchor="top",
+                y=1,
+                xanchor="left",
+                x=1.02,
+            ),
+            template="plotly_white",
+        )
+
+        return fig
+
     def plot_topics(
         self,
         topics: list,
