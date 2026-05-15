@@ -1520,23 +1520,28 @@ class TriTopic:
         
         target_topics = topics or [t.topic_id for t in self.topics_ if t.topic_id != -1]
         
-        for topic_id in tqdm(target_topics, desc="Generating labels", disable=not self.config.verbose):
+        n_total = len(target_topics)
+        for i, topic_id in enumerate(tqdm(target_topics, desc="Generating labels", disable=not self.config.verbose), 1):
             topic = self.get_topic(topic_id)
             if topic is None:
                 continue
-            
+
             # Get representative docs
             rep_docs = self.get_representative_docs(topic_id, n_docs=labeler.n_docs)
             doc_texts = [doc for _, doc in rep_docs]
-            
+
             # Generate label
             label, description = labeler.generate_label(
                 keywords=topic.keywords,
                 representative_docs=doc_texts,
             )
-            
+
             topic.label = label
             topic.description = description
+
+            if labeler.verbose:
+                kw_hint = ", ".join(topic.keywords[:3])
+                print(f"[{i}/{n_total}] Topic {topic_id} ({kw_hint}) → {label}")
     
     def visualize(
         self,

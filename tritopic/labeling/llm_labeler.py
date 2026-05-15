@@ -40,8 +40,10 @@ class LLMLabeler:
         Number of representative documents included in the LLM prompt. Default: 5
     doc_max_chars : int
         Maximum characters per document before truncation. Default: 500
+    verbose : bool
+        Print each label as it is generated. Default: False
     """
-    
+
     def __init__(
         self,
         provider: Literal["anthropic", "openai", "google"] = "anthropic",
@@ -53,6 +55,7 @@ class LLMLabeler:
         domain_hint: str | None = None,
         n_docs: int = 5,
         doc_max_chars: int = 500,
+        verbose: bool = False,
     ):
         self.provider = provider
         self.api_key = api_key
@@ -63,6 +66,7 @@ class LLMLabeler:
         self.domain_hint = domain_hint
         self.n_docs = n_docs
         self.doc_max_chars = doc_max_chars
+        self.verbose = verbose
 
         self._client = None
     
