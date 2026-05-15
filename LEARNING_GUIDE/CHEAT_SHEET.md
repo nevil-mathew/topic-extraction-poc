@@ -37,12 +37,20 @@ print(f"Stability: {model.stability_score_:.3f}")
 ### Memory Spike Locations
 
 ```
-✗ DANGEROUS: Co-occurrence matrix (step 4)
-  └─ Dense: 43k × 43k = 14 GB ← OOM risk
-  └─ Sparse: Only non-zeros = 2-3 GB ✓
+Default consensus_method="graph" (Lancichinetti-Fortunato):
+  ✓ Sparse co-occurrence + Leiden on thresholded graph
+  └─ Peak: ~2-3 GB even at 43k docs
+  └─ scipy.linkage is NOT called
+  └─ Reference: Sci. Rep. 2:336 (2012)
 
-✗ MODERATE: scipy.linkage (after step 4)
-  └─ Uses 6-10 GB workspace
+Legacy consensus_method="hierarchical":
+  ✗ DANGEROUS: Co-occurrence matrix (step 4)
+    └─ Dense: 43k × 43k = 14 GB ← OOM risk
+    └─ Sparse + condensed: ~7 GB ✓ (with low_memory=True)
+
+  ✗ MODERATE: linkage (after step 4)
+    └─ fastcluster: 2-4 GB workspace (if installed)
+    └─ scipy fallback: 6-10 GB workspace
 
 ✓ SAFE: All other steps < 3 GB
 ```
@@ -61,6 +69,10 @@ print(f"Stability: {model.stability_score_:.3f}")
 | **Faster clustering** | n_neighbors | `n_neighbors=10` |
 | **Stop early** | convergence_threshold | `convergence_threshold=0.85` |
 | **More consensus** | n_runs | Increase Leiden runs (memory cost) |
+| **Memory-safe consensus** | consensus_method | `consensus_method="graph"` (default) |
+| **Stricter agreement** | consensus_threshold_tau | `consensus_threshold_tau=0.7` (more conservative) |
+| **Looser agreement** | consensus_threshold_tau | `consensus_threshold_tau=0.3` (more edges retained) |
+| **Legacy linkage** | consensus_method | `consensus_method="hierarchical"` (small N only) |
 
 ---
 

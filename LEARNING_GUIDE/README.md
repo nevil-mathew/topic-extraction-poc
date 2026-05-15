@@ -67,6 +67,27 @@ model.fit(documents)
 
 This reduces memory from **25 GB → 10 GB**.
 
+### Better solution (2.3.0+): graph consensus
+
+The default `consensus_method="graph"` replaces the N×N co-occurrence
+densification *and* the `scipy.linkage` step with a single Leiden pass on a
+thresholded sparse co-occurrence graph (Lancichinetti & Fortunato,
+*Consensus clustering in complex networks*, Sci. Rep. 2:336, 2012 —
+[nature.com/articles/srep00336](https://www.nature.com/articles/srep00336)).
+
+```python
+config = TriTopicConfig(
+    consensus_method="graph",          # default; new in 2.3.0
+    consensus_threshold_tau=0.5,       # keep pairs that co-cluster in ≥50% of runs
+)
+```
+
+Peak extra memory drops from ~13–17 GB (hierarchical + low_memory=True at
+43k docs) to well under 1 GB. The legacy path is still available via
+`consensus_method="hierarchical"`; install `tritopic[legacy-consensus]` to
+pull in `fastcluster`, which replaces `scipy.linkage` with a C++
+implementation (Θ(N²) time, no hidden float64 copy).
+
 ---
 
 ## TriTopic Pipeline

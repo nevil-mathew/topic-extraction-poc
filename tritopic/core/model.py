@@ -109,6 +109,20 @@ class TriTopicConfig:
     # equivalent to the default path; enable for large-N OOM avoidance.
     low_memory: bool = False
 
+    # Consensus strategy for ConsensusLeiden.
+    # - "graph" (default): Lancichinetti-Fortunato graph consensus.  Threshold
+    #   the sparse co-occurrence and run Leiden once on the result.  Avoids
+    #   the N×N dense matrix and the scipy.linkage workspace entirely.
+    # - "hierarchical": legacy average-linkage on the full co-occurrence
+    #   distance.  Uses fastcluster when installed.  ~O(N²) memory; only
+    #   appropriate for small N.
+    consensus_method: Literal["graph", "hierarchical"] = "graph"
+
+    # τ for graph-consensus: minimum fraction of Leiden runs (in [0, 1])
+    # that must co-cluster a pair for it to become a consensus-graph edge.
+    # Robust in [0.3, 0.8] per Lancichinetti & Fortunato (Sci. Rep. 2012).
+    consensus_threshold_tau: float = 0.5
+
 
 class TriTopic:
     """
@@ -233,6 +247,8 @@ class TriTopic:
             n_runs=self.config.n_consensus_runs,
             random_state=self.config.random_state,
             low_memory=self.config.low_memory,
+            consensus_method=self.config.consensus_method,
+            consensus_threshold_tau=self.config.consensus_threshold_tau,
         )
         self._keyword_extractor = KeywordExtractor(
             method=self.config.keyword_method,
@@ -1081,6 +1097,8 @@ class TriTopic:
             n_runs=self.config.n_consensus_runs,
             random_state=self.config.random_state,
             low_memory=self.config.low_memory,
+            consensus_method=self.config.consensus_method,
+            consensus_threshold_tau=self.config.consensus_threshold_tau,
         )
         best_res = sub_clusterer.find_optimal_resolution(
             subgraph,

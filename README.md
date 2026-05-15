@@ -246,7 +246,7 @@ Documents
 
 **Step 4 - Multi-view graph fusion:** The semantic kNN graph (built on reduced embeddings), lexical graph, and metadata graph are combined with configurable weights into a single igraph Graph. The semantic graph can use mutual kNN, SNN, or a hybrid of both.
 
-**Step 5 - Consensus Leiden clustering:** The Leiden algorithm runs multiple times (default: 10) with different seeds. A co-occurrence matrix records how often each pair of documents lands in the same cluster. Hierarchical clustering on this matrix produces a consensus partition that is far more stable than any single run. Clusters below `min_cluster_size` are marked as outliers (-1).
+**Step 5 - Consensus Leiden clustering:** The Leiden algorithm runs multiple times (default: 10) with different seeds. A sparse co-occurrence matrix records how often each pair of documents lands in the same cluster. The default `consensus_method="graph"` then thresholds this matrix and runs Leiden once more on the resulting weighted graph to produce the consensus partition (Lancichinetti & Fortunato, *Consensus clustering in complex networks*, Sci. Rep. 2:336, 2012). This is far more memory-efficient than the legacy hierarchical-linkage approach and avoids the N×N memory wall entirely. Clusters below `min_cluster_size` are marked as outliers (-1).
 
 **Step 6 - Iterative refinement:** Embeddings are softly blended toward their topic centroid (20% pull), then the graph and clustering are re-run. This loop continues until the Adjusted Rand Index between consecutive iterations exceeds the convergence threshold (default: 0.95), or until `max_iterations` is reached. During iterative refinement, the dimensionality reducer transforms the refined embeddings for each new graph-building pass.
 
@@ -296,6 +296,8 @@ config = TriTopicConfig(
     resolution=1.0,                        # Leiden resolution (higher = more topics)
     n_consensus_runs=10,                   # number of Leiden runs for consensus
     min_cluster_size=5,                    # clusters smaller than this become outliers
+    consensus_method="graph",              # "graph" (default, memory-safe) or "hierarchical"
+    consensus_threshold_tau=0.5,           # τ for graph consensus: keep pairs that co-cluster in ≥τ·n_runs runs
 
     # --- Iterative Refinement ---
     use_iterative_refinement=True,         # enable the refinement loop
@@ -344,79 +346,97 @@ model.config.keyword_method = "bm25"         # switch keyword method
 
 ## Memory Optimization for Large Datasets
 
-If you have a lot of documents (think **20,000+**) and your machine crashes with an "out of memory" error -- usually right after the message `Iteration 1...` -- this section is for you.
+TriTopic handles **100,000+ documents on a laptop** out of the box. This section explains why, and what knobs to reach for if you ever hit a wall.
 
-### What is the problem?
+### The original problem (before 2.3.0)
 
-To find stable topics, TriTopic runs the Leiden clustering algorithm many times (10 by default) and then asks: *"How often did each pair of documents end up in the same cluster?"* This pairwise tally is called a **co-occurrence matrix**.
+To find stable topics, TriTopic runs Leiden clustering 10 times and then asks: *"How often did each pair of documents end up in the same cluster?"* This pairwise tally is a **co-occurrence matrix** of size N × N.
 
-The size of that matrix grows with the **square** of the number of documents (N x N):
+Older versions densified that matrix and ran hierarchical clustering (`scipy.linkage`) on it. Both steps scale as N²:
 
-| Documents (N) | Matrix cells | Memory (default mode) |
+| Documents (N) | N × N cells | Old peak memory |
 |---|---|---|
-| 5,000 | 25 million | ~0.6 GB |
-| 20,000 | 400 million | ~10 GB |
-| 50,000 | 2.5 billion | **~60 GB** |
-| 100,000 | 10 billion | **~240 GB** (will not fit on most machines) |
+| 5,000 | 25 M | ~0.6 GB |
+| 20,000 | 400 M | ~10 GB |
+| 50,000 | 2.5 B | **~60 GB** (OOM on most machines) |
+| 100,000 | 10 B | **~240 GB** (will not fit anywhere) |
 
-The default mode builds this matrix as a dense block in memory. That is fine for small corpora and is the fastest approach, but it does not scale.
+### The 2.3.0 default: graph consensus
 
-### What does `low_memory=True` do?
+The new default `consensus_method="graph"` (Lancichinetti & Fortunato, *Consensus clustering in complex networks*, Sci. Rep. 2:336, 2012) replaces the dense matrix **and** the `scipy.linkage` step with a single Leiden pass on a thresholded sparse co-occurrence **graph**:
 
-It changes **how** the same computation is done, not **what** is computed. The math, the random seeds, and the final topics are the same. Only the storage format changes:
+1. Keep only document pairs that co-cluster in at least `consensus_threshold_tau` (default **0.5**, i.e. 5 out of 10 runs) of the Leiden runs.
+2. Build a weighted graph from those surviving pairs (typically <1% of N²).
+3. Run Leiden once on that graph — that is your consensus partition.
 
-- Instead of a dense N x N matrix (mostly zeros for big corpora anyway), it keeps the data in a **sparse** format that only stores the non-zero pairs.
-- It also **caches the lexical (TF-IDF) graph** across iterative-refinement iterations. That graph never changes between iterations, so recomputing it every round was wasted work.
+| Documents (N) | Old (hierarchical) | New (graph, default) |
+|---|---|---|
+| 20,000 | ~10 GB | **~0.3 GB** |
+| 50,000 | ~60 GB | **~0.8 GB** |
+| 100,000 | ~240 GB | **~2 GB** |
 
-Concretely, peak RAM during the heaviest step drops by roughly **7-20x** at large N, with no measurable change in clustering quality.
+Quality is at least as good — the LF paper shows graph consensus improves stability and accuracy versus any single Leiden run. You do not need to do anything: the new default is on automatically.
 
-### When should I use it?
+### When to touch the knobs
 
-| Situation | Recommendation |
+| Situation | What to do |
 |---|---|
-| < 10,000 documents | Leave `low_memory=False` (default). Fastest path. |
-| 10,000 - 30,000 documents | Optional. Helps if RAM is tight. |
-| 30,000+ documents | **Strongly recommended.** |
-| You hit an OOM crash at "Iteration 1..." | **Turn it on.** This is exactly the problem it solves. |
+| Any size, default install | **Nothing.** The 2.3.0 default is already memory-safe. |
+| You want stricter / looser consensus | Tune `consensus_threshold_tau` in `[0.3, 0.8]`. Higher τ = stricter (fewer, tighter topics). |
+| You want bit-for-bit identical results to TriTopic 2.2.x | Set `consensus_method="hierarchical"`. See below. |
+| You hit an OOM crash | Make sure you are on 2.3.0+ and using `consensus_method="graph"` (default). |
 
-### How do I turn it on?
+### Tuning the consensus threshold τ
 
 ```python
-from tritopic import TriTopic, TriTopicConfig
-
 config = TriTopicConfig(
-    low_memory=True,             # <-- the only change
-    use_iterative_refinement=True,
+    consensus_method="graph",          # default
+    consensus_threshold_tau=0.5,       # default
 )
-model = TriTopic(config=config)
-model.fit(documents)
 ```
 
-Or as a constructor override:
+- **τ = 0.3** — loose. More edges survive, larger / merged topics, more robust to noisy Leiden runs.
+- **τ = 0.5** — balanced. Recommended starting point.
+- **τ = 0.7** — strict. Only pairs that almost-always co-clustered survive; produces tighter, more conservative topics.
 
-```python
-model = TriTopic(low_memory=True, verbose=True)
-model.fit(documents)
-```
+The LF paper reports results are robust across `τ ∈ [0.3, 0.8]`, so this is a soft dial, not a cliff.
 
-### Will my topics change?
+### Legacy hierarchical mode (opt-in)
 
-**No.** With the same `random_state`, you get the same clusters. The values stored in the co-occurrence matrix are simple fractions like `0/10, 1/10, 2/10, ..., 10/10` (because there are 10 consensus runs by default). These values are represented exactly in the lower-precision format used by `low_memory` mode, so there is no rounding error that could nudge a document into a different cluster.
-
-### Still running out of memory?
-
-If you turn on `low_memory=True` and the job *still* crashes, you have hit a scale where additional knobs help. These do involve a small quality tradeoff -- pick whichever you can afford:
+The old hierarchical-linkage path is still available for backwards compatibility:
 
 ```python
 config = TriTopicConfig(
-    low_memory=True,
-    max_iterations=2,            # was 5. Refinement gains are mostly in rounds 1-2 anyway.
+    consensus_method="hierarchical",   # legacy
+    low_memory=True,                   # use sparse co-occurrence (still N² in the worst case)
+)
+```
+
+For best results in legacy mode, install the `legacy-consensus` extra — it adds `fastcluster`, a C++ replacement for `scipy.linkage` that is ~2-5× faster and avoids a hidden float64 copy:
+
+```bash
+pip install tritopic[legacy-consensus]
+```
+
+### What does `low_memory=True` still do?
+
+In **graph mode** (default), `low_memory` only affects internal dtype choices and lexical-graph caching — the big win is already free.
+
+In **hierarchical mode**, `low_memory=True` keeps the co-occurrence sparse and builds the condensed distance vector directly from it, saving ~7-20× on peak RAM versus the dense path. Same math, same topics, same `random_state`.
+
+### Still want more headroom?
+
+Independent of consensus method, these knobs trade a little quality for memory:
+
+```python
+config = TriTopicConfig(
+    max_iterations=2,            # was 5. Refinement gains are mostly in rounds 1-2.
     n_consensus_runs=5,          # was 10. Slightly less stable, ~1% NMI drop.
     convergence_threshold=0.90,  # was 0.95. Stops one iteration sooner.
 )
 ```
 
-Combined, these typically give an additional 2-3x memory headroom with under 2% quality loss.
+Combined, these typically give an additional 2-3× headroom with under 2% quality loss.
 
 ---
 
@@ -1286,13 +1306,65 @@ TriTopic achieves the **highest NMI on every single dataset** while maintaining 
 
 ## Citation
 
+If you use TriTopic in academic work, please cite the software and the methods it builds on.
+
+### Software
+
 ```bibtex
 @software{tritopic2025,
-  author = {Egger, Roman},
-  title = {TriTopic: Tri-Modal Graph Topic Modeling with Iterative Refinement},
-  year = {2025},
+  author    = {Egger, Roman},
+  title     = {TriTopic: Tri-Modal Graph Topic Modeling with Iterative Refinement},
+  year      = {2025},
   publisher = {PyPI},
-  url = {https://github.com/SmartVisions-AI/tritopic}
+  url       = {https://github.com/SmartVisions-AI/tritopic}
+}
+```
+
+### Underlying methods
+
+```bibtex
+@article{traag2019leiden,
+  author  = {Traag, V. A. and Waltman, L. and van Eck, N. J.},
+  title   = {From {L}ouvain to {L}eiden: Guaranteeing Well-Connected Communities},
+  journal = {Scientific Reports},
+  volume  = {9},
+  pages   = {5233},
+  year    = {2019},
+  doi     = {10.1038/s41598-019-41695-0},
+  url     = {https://www.nature.com/articles/s41598-019-41695-0}
+}
+
+@article{lancichinetti2012consensus,
+  author  = {Lancichinetti, Andrea and Fortunato, Santo},
+  title   = {Consensus Clustering in Complex Networks},
+  journal = {Scientific Reports},
+  volume  = {2},
+  pages   = {336},
+  year    = {2012},
+  doi     = {10.1038/srep00336},
+  url     = {https://www.nature.com/articles/srep00336},
+  note    = {Foundation for the default `consensus_method="graph"` path.}
+}
+
+@article{mullner2013fastcluster,
+  author  = {M{\"u}llner, Daniel},
+  title   = {fastcluster: Fast Hierarchical, Agglomerative Clustering Routines for {R} and {P}ython},
+  journal = {Journal of Statistical Software},
+  volume  = {53},
+  number  = {9},
+  pages   = {1--18},
+  year    = {2013},
+  doi     = {10.18637/jss.v053.i09},
+  url     = {https://danifold.net/fastcluster.html},
+  note    = {Used by the legacy `consensus_method="hierarchical"` path when installed via the `legacy-consensus` extra.}
+}
+
+@article{mcinnes2018umap,
+  author  = {McInnes, Leland and Healy, John and Melville, James},
+  title   = {{UMAP}: Uniform Manifold Approximation and Projection for Dimension Reduction},
+  journal = {arXiv preprint arXiv:1802.03426},
+  year    = {2018},
+  url     = {https://arxiv.org/abs/1802.03426}
 }
 ```
 

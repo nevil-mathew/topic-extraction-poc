@@ -73,6 +73,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Drop-in C++ replacement for scipy.cluster.hierarchy.linkage used by the
+# legacy "hierarchical" consensus path.  Not required for the default
+# "graph" consensus method.
+legacy-consensus = [
+    "fastcluster>=1.2.0",
+]
 llm = [
     "anthropic>=0.18.0",
     "openai>=1.0.0",

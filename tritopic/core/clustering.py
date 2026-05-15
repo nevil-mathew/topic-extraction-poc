@@ -46,12 +46,20 @@ class ConsensusLeiden:
         random_state: int = 42,
         consensus_threshold: float = 0.5,
         low_memory: bool = False,
+        consensus_method: str = "graph",
+        consensus_threshold_tau: float = 0.5,
     ):
         self.resolution = resolution
         self.n_runs = n_runs
         self.random_state = random_state
         self.consensus_threshold = consensus_threshold
         self.low_memory = low_memory
+        if consensus_method not in ("graph", "hierarchical"):
+            raise ValueError(
+                f"consensus_method must be 'graph' or 'hierarchical', got {consensus_method!r}"
+            )
+        self.consensus_method = consensus_method
+        self.consensus_threshold_tau = consensus_threshold_tau
         
         self.labels_: np.ndarray | None = None
         self.stability_score_: float | None = None
@@ -119,17 +127,16 @@ class ConsensusLeiden:
         """
         Compute consensus partition from multiple runs.
 
-        Uses a sparse co-occurrence matrix and hierarchical clustering.
-        Scales to large datasets by building the co-occurrence in sparse
-        form and converting only the upper triangle to a condensed distance
-        vector for ``linkage``.
+        Two strategies are supported, chosen by ``self.consensus_method``:
 
-        When ``self.low_memory`` is True, the condensed distance is built
-        directly from the sparse co-occurrence (float32), skipping the
-        N×N dense intermediate.  Output is numerically equivalent.
+        - ``"graph"`` (default, memory-efficient): threshold the sparse
+          co-occurrence and run Leiden once on the resulting weighted graph.
+          Peak memory ~O(E).  Reference: Lancichinetti & Fortunato,
+          *Consensus clustering in complex networks*, Sci. Rep. 2:336 (2012).
+        - ``"hierarchical"`` (legacy): average-linkage on the full
+          co-occurrence distance.  Peak memory ~O(N²); use only for small N.
         """
         from scipy.sparse import csr_matrix as sp_csr
-        from scipy.spatial.distance import squareform
 
         n_nodes = len(partitions[0])
         n_runs = len(partitions)
@@ -153,6 +160,16 @@ class ConsensusLeiden:
                 co_occur = co_run
             else:
                 co_occur = co_occur + co_run
+
+        if self.consensus_method == "graph":
+            return self._consensus_via_leiden_on_graph(
+                co_occur, n_nodes, n_runs, partitions
+            )
+
+        # ------------------------------------------------------------------
+        # Legacy hierarchical path (consensus_method == "hierarchical")
+        # ------------------------------------------------------------------
+        from scipy.spatial.distance import squareform
 
         if self.low_memory:
             # Build condensed distance directly from sparse co-occurrence.
@@ -195,8 +212,15 @@ class ConsensusLeiden:
 
             condensed = squareform(distance, checks=False)
 
-        # Average linkage tends to work well for consensus
-        Z = linkage(condensed, method="average")
+        # Average linkage tends to work well for consensus.
+        # Prefer fastcluster (C++, Θ(N²) time, no hidden float64 copy) when
+        # available; fall back to scipy for environments without it.
+        try:
+            import fastcluster
+
+            Z = fastcluster.linkage(condensed, method="average")
+        except ImportError:
+            Z = linkage(condensed, method="average")
 
         # Cut at threshold that matches approximate number of clusters
         # from the most frequent partition
@@ -234,7 +258,79 @@ class ConsensusLeiden:
                     best_labels = p
 
         return best_labels
-    
+
+    def _consensus_via_leiden_on_graph(
+        self,
+        co_occur,
+        n_nodes: int,
+        n_runs: int,
+        partitions: list[np.ndarray],
+    ) -> np.ndarray:
+        """
+        Graph-based consensus (Lancichinetti & Fortunato 2012).
+
+        Threshold the sparse co-occurrence at ``self.consensus_threshold_tau``
+        (fraction of runs that must agree on a pair), build an igraph weighted
+        graph from the surviving edges, and run Leiden once to obtain the
+        consensus partition.  Peak memory is O(E) for E surviving edges,
+        avoiding the N×N dense matrix and the scipy.linkage workspace.
+        """
+        import igraph as ig
+        import leidenalg as la
+
+        # Symmetrize sparsely and pull out the upper-triangle COO entries.
+        co = (co_occur + co_occur.T) * 0.5
+        coo = co.tocoo()
+        coo.sum_duplicates()
+
+        mask_upper = coo.row < coo.col
+        rows = coo.row[mask_upper]
+        cols = coo.col[mask_upper]
+        # Co-clustering frequency in [0, 1].
+        freq = coo.data[mask_upper].astype(np.float64) / float(n_runs)
+
+        tau = float(self.consensus_threshold_tau)
+
+        def _build_and_cluster(threshold: float) -> np.ndarray | None:
+            keep = freq >= threshold
+            if not np.any(keep):
+                return None
+            edges = list(zip(rows[keep].tolist(), cols[keep].tolist()))
+            weights = freq[keep].tolist()
+            g = ig.Graph(n=n_nodes, edges=edges, directed=False)
+            g.es["weight"] = weights
+            part = la.find_partition(
+                g,
+                la.RBConfigurationVertexPartition,
+                weights="weight",
+                resolution_parameter=self.resolution,
+                seed=self.random_state,
+            )
+            return np.asarray(part.membership)
+
+        labels = _build_and_cluster(tau)
+
+        # If thresholding wiped out the graph (or left everything isolated),
+        # back off once.  Isolated nodes form singleton clusters in Leiden,
+        # so "degenerate" here means *every* node became a singleton.
+        if labels is None or len(np.unique(labels)) >= n_nodes:
+            relaxed = max(tau * 0.7, 1.0 / n_runs)
+            if relaxed < tau:
+                labels = _build_and_cluster(relaxed)
+
+        if labels is None or len(np.unique(labels)) >= n_nodes:
+            # Final fallback: pick the input partition with highest mean ARI.
+            best_fallback_score = -1.0
+            best = partitions[0]
+            for p in partitions:
+                avg = float(np.mean([adjusted_rand_score(p, q) for q in partitions]))
+                if avg > best_fallback_score:
+                    best_fallback_score = avg
+                    best = p
+            labels = best
+
+        return labels
+
     def _handle_small_clusters(
         self,
         labels: np.ndarray,
