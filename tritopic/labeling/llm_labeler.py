@@ -197,28 +197,30 @@ class LLMLabeler:
             domain_context = f"\nDomain context: This is about {hint}.\n"
 
         system_prompt = (
-            "You are an expert at creating concise, meaningful topic labels for topic modeling. "
+            "You are a qualitative research analyst skilled at surfacing higher-order themes from "
+            "clusters of documents. Your task is to identify the deeper human concern, motivation, "
+            "perception, or systemic pattern that unifies a cluster — not just its surface subject. "
             "You always respond with valid JSON and nothing else."
         )
 
-        user_prompt = f"""Given the following information about a topic, create:
-1. A SHORT LABEL (2-5 words, title case, no special characters)
-2. A BRIEF DESCRIPTION (1-2 sentences explaining what this topic is about)
+        user_prompt = f"""You are analyzing a cluster of documents from a topic model. Your goal is to name the THEME — the deeper meaning — that unifies this cluster, not simply describe its subject matter.
 
-Keywords (most representative words for this topic):
+Keywords (statistically representative of this cluster):
 {', '.join(keywords[:10])}
 
 Representative Documents:
 {docs_text}
 {domain_context}
-Requirements:
-- The label should be specific and descriptive, not generic
-- The label should capture the main theme, not just list keywords
-- The description should explain what documents in this topic discuss
-- Output in {self.language}
+Instructions:
+- Identify the underlying human concern, motivation, perception, or systemic pattern that connects these documents.
+- Do NOT produce surface-level category names (e.g. "Infrastructure Issues", "Teacher Feedback", "Attendance Problems").
+- DO produce insight-oriented themes that synthesize multiple related signals into one coherent narrative (e.g. "Erosion of Trust in Institutional Responsiveness", "Structural Barriers to Equitable Access").
+- The theme label should be 3-7 words, title case, no special characters.
+- The description should explain the underlying concern in 1-2 sentences — what people are really expressing, not just what they are talking about.
+- Output in {self.language}.
 
 Respond ONLY with this exact JSON format, no other text:
-{{"label": "Your Topic Label", "description": "Your brief description."}}"""
+{{"label": "Your Theme Label", "description": "Your insight-oriented description."}}"""
 
         return system_prompt, user_prompt
     
