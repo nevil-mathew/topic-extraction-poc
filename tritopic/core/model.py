@@ -45,6 +45,12 @@ class TriTopicConfig:
     # Embedding settings
     embedding_model: str = "all-MiniLM-L6-v2"
     embedding_batch_size: int = 32
+    embedding_provider: Literal["local", "google"] = "local"
+    embedding_api_key: str | None = field(default=None, repr=False)
+    embedding_api_batch_size: int = 100
+    embedding_output_dim: int | None = None
+    embedding_task_type: str | None = None
+    embedding_batch_delay: float = 0.0
     language: str = "english"
     
     # Graph settings
@@ -208,6 +214,12 @@ class TriTopic:
         self._embedding_engine = EmbeddingEngine(
             model_name=self.config.embedding_model,
             batch_size=self.config.embedding_batch_size,
+            provider=self.config.embedding_provider,
+            api_key=self.config.embedding_api_key,
+            api_batch_size=self.config.embedding_api_batch_size,
+            output_dim=self.config.embedding_output_dim,
+            task_type=self.config.embedding_task_type,
+            batch_delay=self.config.embedding_batch_delay,
         )
         self._graph_builder = GraphBuilder(
             n_neighbors=self.config.n_neighbors,
@@ -301,7 +313,12 @@ class TriTopic:
                 print("   + Using provided embeddings")
         else:
             if self.config.verbose:
-                print(f"   > Generating embeddings ({self.config.embedding_model})...")
+                provider_tag = (
+                    f"{self.config.embedding_provider}:{self.config.embedding_model}"
+                    if self.config.embedding_provider != "local"
+                    else self.config.embedding_model
+                )
+                print(f"   > Generating embeddings ({provider_tag})...")
             self.embeddings_ = self._embedding_engine.encode(documents)
 
         # Keep unrefined copy so transform() compares new docs in the same space
@@ -1834,6 +1851,18 @@ class TriTopic:
             config.language = "english"
         if not hasattr(config, "soft_assignment_method"):
             config.soft_assignment_method = "centroid"
+        if not hasattr(config, "embedding_provider"):
+            config.embedding_provider = "local"
+        if not hasattr(config, "embedding_api_key"):
+            config.embedding_api_key = None
+        if not hasattr(config, "embedding_api_batch_size"):
+            config.embedding_api_batch_size = 100
+        if not hasattr(config, "embedding_output_dim"):
+            config.embedding_output_dim = None
+        if not hasattr(config, "embedding_task_type"):
+            config.embedding_task_type = None
+        if not hasattr(config, "embedding_batch_delay"):
+            config.embedding_batch_delay = 0.0
 
         model = cls(config=config)
         model.n_topics = state.get("n_topics", "auto")

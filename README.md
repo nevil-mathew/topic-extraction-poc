@@ -236,7 +236,7 @@ Documents
                                 outliers   topics         topics
 ```
 
-**Step 1 - Embeddings:** Documents are encoded into dense vectors using a sentence-transformer model. You can pass pre-computed embeddings instead.
+**Step 1 - Embeddings:** Documents are encoded into dense vectors using a sentence-transformer model (local) or a cloud embedding API (e.g. Google Gemini). Pre-computed embeddings can also be passed directly.
 
 **Step 1.5 - Dimensionality reduction:** High-dimensional embeddings (384-768d) are projected to ~10 dimensions using UMAP or PaCMAP. This dramatically improves kNN neighbor quality and speeds up graph construction. Full-dimensional embeddings are kept for centroid computation and keyword extraction.
 
@@ -263,8 +263,14 @@ from tritopic import TriTopic, TriTopicConfig
 
 config = TriTopicConfig(
     # --- Embedding ---
-    embedding_model="all-MiniLM-L6-v2",   # sentence-transformers model name
-    embedding_batch_size=32,               # encoding batch size
+    embedding_model="all-MiniLM-L6-v2",   # sentence-transformers model (local) or API model name
+    embedding_batch_size=32,               # local GPU batch size
+    embedding_provider="local",            # "local" or "google"
+    embedding_api_key=None,                # API key (not shown in repr)
+    embedding_api_batch_size=100,          # documents per API request (max 250 for Gemini)
+    embedding_output_dim=None,             # MRL output dimensionality (auto-768 for Google)
+    embedding_task_type=None,              # task hint for gemini-embedding-001: "CLUSTERING" etc.
+    embedding_batch_delay=0.0,             # seconds between API batches (set ~4.0 on free tier)
 
     # --- Dimensionality Reduction ---
     use_dim_reduction=True,                # reduce before graph building
@@ -1107,7 +1113,7 @@ The main model class. Follows the scikit-learn fit/transform pattern.
 | Class | Module | Purpose |
 |---|---|---|
 | `TriTopicConfig` | `tritopic.core.model` | All configuration parameters (see [Configuration Reference](#configuration-reference)) |
-| `EmbeddingEngine` | `tritopic.core.embeddings` | Encode documents with sentence-transformers. Supports Instructor and BGE models. |
+| `EmbeddingEngine` | `tritopic.core.embeddings` | Encode documents with sentence-transformers (local) or Google Gemini API. Supports Instructor, BGE, and API-based models. |
 | `MultiModelEmbedding` | `tritopic.core.embeddings` | Combine embeddings from multiple models. |
 | `GraphBuilder` | `tritopic.core.graph_builder` | Build kNN, mutual kNN, SNN, hybrid, lexical, and metadata graphs. |
 | `ConsensusLeiden` | `tritopic.core.clustering` | Leiden clustering with consensus and resolution search. |
@@ -1142,6 +1148,8 @@ After an initial clustering pass, document embeddings are softly blended toward 
 
 ### Supported embedding models
 
+#### Local models (sentence-transformers)
+
 Any model from the [sentence-transformers](https://www.sbert.net/) library works. Recommended choices:
 
 | Model | Dimensions | Speed | Quality | Notes |
@@ -1151,6 +1159,63 @@ Any model from the [sentence-transformers](https://www.sbert.net/) library works
 | `BAAI/bge-base-en-v1.5` | 768 | Medium | Best | State-of-the-art for English. |
 | `BAAI/bge-m3` | 1024 | Slow | Best | Multilingual support. |
 | `hkunlp/instructor-large` | 768 | Slow | Best | Task-specific with instructions. |
+
+#### API-based embedding (Google Gemini)
+
+To use Google Gemini embeddings instead of a local model, set `embedding_provider="google"`.
+Requires: `pip install 'tritopic[llm]'`
+
+```python
+from tritopic import TriTopic, TriTopicConfig
+
+config = TriTopicConfig(
+    embedding_provider="google",
+    embedding_api_key="YOUR_GOOGLE_API_KEY",
+    # Optional tuning:
+    embedding_output_dim=768,        # Matryoshka compression (128–3072); default 768
+    embedding_api_batch_size=100,    # docs per request (max 250)
+    embedding_batch_delay=4.0,       # set ~4.0 on Gemini free tier (5–15 RPM)
+)
+model = TriTopic(config=config)
+model.fit(documents)
+```
+
+**Supported Gemini models:**
+
+| Model | Default dims | MRL range | task_type | Notes |
+|---|---|---|---|---|
+| `gemini-embedding-2` | 768* | 128–3072 | via prompt prefix | Default. Best quality, 8192 tok/text. |
+| `gemini-embedding-001` | 768 | — | ✅ (`CLUSTERING` etc.) | Stable, 2048 tok/text. |
+
+\* `gemini-embedding-2` output defaults to 768 dims (Matryoshka truncation). Pass `embedding_output_dim=3072` for full resolution — same API cost, higher memory.
+
+**With `gemini-embedding-2` (default, best quality):**
+```python
+config = TriTopicConfig(
+    embedding_provider="google",
+    embedding_api_key="YOUR_GOOGLE_API_KEY",
+    embedding_model="gemini-embedding-2",    # explicit; also the default
+    embedding_output_dim=768,                # Matryoshka default (pass 3072 for full resolution)
+    embedding_api_batch_size=100,            # docs per request (max 250)
+    embedding_batch_delay=4.0,               # ~4.0 for free tier; 0.0 for paid
+)
+model = TriTopic(config=config)
+model.fit(documents)
+```
+
+**With `gemini-embedding-001` (stable, supports task_type):**
+```python
+config = TriTopicConfig(
+    embedding_provider="google",
+    embedding_api_key="YOUR_GOOGLE_API_KEY",
+    embedding_model="gemini-embedding-001",
+    embedding_task_type="CLUSTERING",        # optimises embeddings for topic modeling
+)
+model = TriTopic(config=config)
+model.fit(documents)
+```
+
+For `gemini-embedding-2`, `embedding_task_type` is automatically applied as a prompt prefix (the model does not accept it as an API parameter).
 
 ---
 
