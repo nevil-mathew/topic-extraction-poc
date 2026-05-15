@@ -251,23 +251,30 @@ Respond ONLY with this exact JSON format, no other text:
     def _call_google(self, system_prompt: str, user_prompt: str) -> str:
         """Call Google Gemini API via google-genai with structured JSON output."""
         from google.genai import types
+
+        # gemini-2.5-* are thinking models; disable thinking so output tokens
+        # are not crowded out by reasoning tokens, which would truncate the JSON.
+        config_kwargs: dict = dict(
+            system_instruction=system_prompt,
+            temperature=self.temperature,
+            max_output_tokens=max(self.max_tokens, 1024),
+            response_mime_type="application/json",
+            response_schema=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "label": types.Schema(type=types.Type.STRING),
+                    "description": types.Schema(type=types.Type.STRING),
+                },
+                required=["label", "description"],
+            ),
+        )
+        if "2.5" in self.model:
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+
         response = self._client.models.generate_content(
             model=self.model,
             contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=self.temperature,
-                max_output_tokens=self.max_tokens,
-                response_mime_type="application/json",
-                response_schema=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "label": types.Schema(type=types.Type.STRING),
-                        "description": types.Schema(type=types.Type.STRING),
-                    },
-                    required=["label", "description"],
-                ),
-            ),
+            config=types.GenerateContentConfig(**config_kwargs),
         )
         return response.text
 
