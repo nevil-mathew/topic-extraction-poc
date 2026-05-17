@@ -803,6 +803,27 @@ fig.show()
 fig.write_html("document_map_3d.html")
 ```
 
+### Intertopic distance map
+
+A pyLDAvis-style overview: each bubble is a topic (area ∝ document count),
+positioned by the 2-D projection of its centroid. Much faster than
+`visualize()` because it only projects `n_topics` points rather than every
+document — ideal for grasping the topic landscape at a glance.
+
+```python
+fig = model.visualize_topic_map()                    # MDS on cosine distances (default)
+fig = model.visualize_topic_map(method="pca")        # deterministic
+fig = model.visualize_topic_map(method="umap", n_keywords=8, size_scale=1.5)
+fig.show()
+```
+
+| Parameter | Description |
+|---|---|
+| `method` | `"mds"` (default, cosine-distance MDS), `"pca"`, or `"umap"` |
+| `n_keywords` | Top-N keywords shown in hover text |
+| `size_scale` | Multiplier for bubble area |
+| `title`, `width`, `height`, `random_state` | Standard Plotly options |
+
 ### TensorFlow Embedding Projector export
 
 Export to [projector.tensorflow.org](https://projector.tensorflow.org) for interactive PCA / UMAP / t-SNE exploration in the browser, with topics visible as color labels:
@@ -1095,6 +1116,7 @@ The main model class. Follows the scikit-learn fit/transform pattern.
 | `evaluate()` | Compute coherence, diversity, stability, and outlier ratio. |
 | `visualize(method?, show_outliers?, ...)` | 2D document scatter plot. |
 | `visualize_3d(method?, show_outliers?, ...)` | Interactive 3D document scatter plot. |
+| `visualize_topic_map(method?, ...)` | Intertopic distance map — 2D projection of topic centroids, bubbles sized by topic count. |
 | `export_projector(output_dir?, embeddings?)` | Export `vectors.tsv` + `metadata.tsv` for [projector.tensorflow.org](https://projector.tensorflow.org). Returns `(vectors_path, metadata_path)`. |
 | `visualize_topics(n_keywords?, ...)` | Keyword bar charts per topic. |
 | `visualize_hierarchy(...)` | Topic dendrogram. |

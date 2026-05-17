@@ -1683,13 +1683,48 @@ class TriTopic:
     def visualize_topics(self, **kwargs):
         """Visualize topics as a heatmap or bar chart."""
         from tritopic.visualization.plotter import TopicVisualizer
-        
+
         if not self._is_fitted:
             raise ValueError("Model not fitted. Call fit() first.")
-        
+
         visualizer = TopicVisualizer()
         return visualizer.plot_topics(
             topics=self.topics_,
+            **kwargs,
+        )
+
+    def visualize_topic_map(
+        self,
+        method: Literal["mds", "pca", "umap"] = "mds",
+        **kwargs,
+    ):
+        """Intertopic distance map: 2-D projection of topic centroids.
+
+        Bubbles are sized by topic count and positioned by centroid distance, so
+        the overall topic landscape is visible at a glance — much faster than
+        :meth:`visualize`, which re-projects every document.
+
+        Parameters
+        ----------
+        method : {"mds", "pca", "umap"}
+            Projection used on the centroid matrix. ``"mds"`` (default) operates
+            on cosine distances and matches the pyLDAvis convention.
+        **kwargs
+            Forwarded to :func:`tritopic.visualization.plotter.plot_intertopic_distance_map`
+            (``n_keywords``, ``size_scale``, ``title``, ``width``, ``height``,
+            ``random_state``).
+        """
+        from tritopic.visualization.plotter import plot_intertopic_distance_map
+
+        if not self._is_fitted:
+            raise ValueError("Model not fitted. Call fit() first.")
+        if self.topic_embeddings_ is None:
+            raise ValueError("Topic centroids are not available.")
+
+        return plot_intertopic_distance_map(
+            topic_embeddings=self.topic_embeddings_,
+            topics=self.topics_,
+            method=method,
             **kwargs,
         )
     

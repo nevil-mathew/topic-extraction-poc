@@ -698,6 +698,138 @@ def plot_topic_overlap(
     return fig
 
 
+def plot_intertopic_distance_map(
+    topic_embeddings: np.ndarray,
+    topics: list,
+    method: Literal["mds", "pca", "umap"] = "mds",
+    n_keywords: int = 5,
+    size_scale: float = 1.0,
+    title: str = "Intertopic Distance Map",
+    width: int = 800,
+    height: int = 600,
+    random_state: int = 42,
+) -> go.Figure:
+    """Plot a 2-D map of topic centroids, bubble area proportional to topic size.
+
+    Inspired by pyLDAvis / BERTopic's intertopic distance map: the projection
+    operates on *topic centroids* rather than documents, so it is fast and
+    produces a clean view of the topic landscape (which topics cluster, which
+    stand alone) regardless of corpus size.
+
+    Parameters
+    ----------
+    topic_embeddings : np.ndarray
+        Centroid embeddings, shape ``(n_topics, embedding_dim)``. Must be aligned
+        with ``topics`` (same order, outliers excluded).
+    topics : list[TopicInfo]
+        Topic information objects. Topics with ``topic_id == -1`` are dropped.
+    method : {"mds", "pca", "umap"}
+        Projection method for centroids → 2-D.
+    n_keywords : int
+        Number of keywords shown in hover text.
+    size_scale : float
+        Multiplier applied to bubble area.
+    title : str
+        Plot title.
+    width, height : int
+        Figure dimensions.
+    random_state : int
+        Seed for stochastic projection methods.
+
+    Returns
+    -------
+    fig : go.Figure
+    """
+    valid_idx = [i for i, t in enumerate(topics) if t.topic_id != -1]
+    valid_topics = [topics[i] for i in valid_idx]
+    centroids = topic_embeddings[valid_idx]
+
+    n = len(valid_topics)
+    if n < 2:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Need at least 2 topics for an intertopic map",
+            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
+        )
+        return fig
+
+    if method == "pca":
+        from sklearn.decomposition import PCA
+        coords = PCA(n_components=2, random_state=random_state).fit_transform(centroids)
+    elif method == "umap":
+        from umap import UMAP
+        n_neighbors = max(2, min(15, n - 1))
+        coords = UMAP(
+            n_components=2,
+            n_neighbors=n_neighbors,
+            metric="cosine",
+            random_state=random_state,
+        ).fit_transform(centroids)
+    else:  # mds (default) — operates on cosine distances
+        from sklearn.manifold import MDS
+        from sklearn.metrics.pairwise import cosine_distances
+        dist = cosine_distances(centroids)
+        coords = MDS(
+            n_components=2,
+            dissimilarity="precomputed",
+            random_state=random_state,
+            normalized_stress="auto",
+        ).fit_transform(dist)
+
+    sizes = np.array([t.size for t in valid_topics], dtype=float)
+    total = sizes.sum() if sizes.sum() > 0 else 1.0
+    share = sizes / total
+    # sizemode="area" expects raw size values; scale so the largest topic ≈ 60px.
+    marker_sizes = np.sqrt(share) * 60.0 * size_scale
+
+    labels = [t.label or f"Topic {t.topic_id}" for t in valid_topics]
+    hover_texts = []
+    for t, s, p in zip(valid_topics, sizes, share):
+        kw = ", ".join(t.keywords[:n_keywords]) if t.keywords else ""
+        name = t.label or f"Topic {t.topic_id}"
+        hover_texts.append(
+            f"<b>{name}</b><br>"
+            f"ID: {t.topic_id}<br>"
+            f"Size: {int(s)} ({p * 100:.1f}%)<br>"
+            f"Keywords: {kw}"
+        )
+
+    fig = go.Figure(data=go.Scatter(
+        x=coords[:, 0],
+        y=coords[:, 1],
+        mode="markers+text",
+        marker=dict(
+            size=marker_sizes,
+            sizemode="area",
+            sizemin=6,
+            color=sizes,
+            colorscale="Viridis",
+            showscale=True,
+            colorbar=dict(title="Topic size"),
+            line=dict(width=1, color="white"),
+            opacity=0.75,
+        ),
+        text=[str(t.topic_id) for t in valid_topics],
+        textposition="middle center",
+        textfont=dict(size=10, color="white"),
+        hovertext=hover_texts,
+        hovertemplate="%{hovertext}<extra></extra>",
+        customdata=labels,
+    ))
+
+    axis_label = method.upper()
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=16)),
+        width=width,
+        height=height,
+        xaxis=dict(title=f"{axis_label} 1", zeroline=False, showgrid=False),
+        yaxis=dict(title=f"{axis_label} 2", zeroline=False, showgrid=False,
+                   scaleanchor="x", scaleratio=1),
+        template="plotly_white",
+    )
+    return fig
+
+
 def plot_hierarchy_tree(
     hierarchy: "TopicHierarchy",
     title: str = "Topic Hierarchy",
