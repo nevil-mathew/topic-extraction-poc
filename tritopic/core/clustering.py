@@ -48,12 +48,14 @@ class ConsensusLeiden:
         low_memory: bool = False,
         consensus_method: str = "graph",
         consensus_threshold_tau: float = 0.5,
+        n_jobs: int = -1,
     ):
         self.resolution = resolution
         self.n_runs = n_runs
         self.random_state = random_state
         self.consensus_threshold = consensus_threshold
         self.low_memory = low_memory
+        self.n_jobs = n_jobs
         if consensus_method not in ("graph", "hierarchical"):
             raise ValueError(
                 f"consensus_method must be 'graph' or 'hierarchical', got {consensus_method!r}"
@@ -70,6 +72,7 @@ class ConsensusLeiden:
         graph: "igraph.Graph",
         min_cluster_size: int = 5,
         resolution: float | None = None,
+        compute_stability: bool = True,
     ) -> np.ndarray:
         """
         Fit Leiden clustering with consensus.
@@ -93,34 +96,34 @@ class ConsensusLeiden:
         res = resolution or self.resolution
         n_nodes = graph.vcount()
         
-        # Run multiple Leiden clusterings
-        self._all_partitions = []
-        
-        for run in range(self.n_runs):
-            seed = self.random_state + run
-            
-            # Run Leiden
-            partition = la.find_partition(
+        from joblib import Parallel, delayed
+
+        def _run_one(seed: int) -> np.ndarray:
+            import leidenalg as _la
+            part = _la.find_partition(
                 graph,
-                la.RBConfigurationVertexPartition,
+                _la.RBConfigurationVertexPartition,
                 weights="weight",
                 resolution_parameter=res,
                 seed=seed,
             )
-            
-            # Convert to labels
-            labels = np.array(partition.membership)
-            self._all_partitions.append(labels)
-        
+            return np.array(part.membership)
+
+        seeds = [self.random_state + run for run in range(self.n_runs)]
+        self._all_partitions = Parallel(n_jobs=self.n_jobs, prefer="threads")(
+            delayed(_run_one)(seed) for seed in seeds
+        )
+
         # Compute consensus
         self.labels_ = self._compute_consensus(self._all_partitions)
-        
+
         # Handle small clusters as outliers
         self.labels_ = self._handle_small_clusters(self.labels_, min_cluster_size)
-        
-        # Compute stability score
-        self.stability_score_ = self._compute_stability()
-        
+
+        # Stability is expensive (45 ARI calls); skip during iterative refinement
+        # and compute once at the end via the compute_stability flag.
+        self.stability_score_ = self._compute_stability() if compute_stability else None
+
         return self.labels_
     
     def _compute_consensus(self, partitions: list[np.ndarray]) -> np.ndarray:
@@ -338,38 +341,40 @@ class ConsensusLeiden:
     ) -> np.ndarray:
         """Mark small clusters as outliers (-1)."""
         result = labels.copy()
-        
-        for cluster_id in np.unique(labels):
-            if cluster_id == -1:
-                continue
-            
-            size = np.sum(labels == cluster_id)
-            if size < min_size:
-                result[labels == cluster_id] = -1
-        
-        # Relabel to consecutive integers
-        unique_labels = sorted([l for l in np.unique(result) if l != -1])
-        label_map = {old: new for new, old in enumerate(unique_labels)}
-        label_map[-1] = -1
-        
-        result = np.array([label_map[l] for l in result])
-        
-        return result
+
+        unique, counts = np.unique(result, return_counts=True)
+        for cid, cnt in zip(unique, counts):
+            if cid != -1 and cnt < min_size:
+                result[result == cid] = -1
+
+        # Relabel to consecutive integers (vectorized)
+        non_outlier = np.sort(np.unique(result[result != -1]))
+        if len(non_outlier) == 0:
+            return result
+        max_id = int(non_outlier[-1])
+        remap = np.full(max_id + 1, -1, dtype=np.int64)
+        remap[non_outlier] = np.arange(len(non_outlier), dtype=np.int64)
+        out = np.where(result == -1, np.int64(-1), remap[np.clip(result, 0, max_id)])
+        return out
     
     def _compute_stability(self) -> float:
         """Compute stability score as average pairwise ARI."""
         if len(self._all_partitions) < 2:
             return 1.0
-        
-        ari_scores = []
-        for i in range(len(self._all_partitions)):
-            for j in range(i + 1, len(self._all_partitions)):
-                ari = adjusted_rand_score(
-                    self._all_partitions[i],
-                    self._all_partitions[j]
-                )
-                ari_scores.append(ari)
-        
+
+        from joblib import Parallel, delayed
+
+        pairs = [
+            (i, j)
+            for i in range(len(self._all_partitions))
+            for j in range(i + 1, len(self._all_partitions))
+        ]
+        ari_scores = Parallel(n_jobs=self.n_jobs, prefer="threads")(
+            delayed(adjusted_rand_score)(
+                self._all_partitions[i], self._all_partitions[j]
+            )
+            for i, j in pairs
+        )
         return float(np.mean(ari_scores))
     
     def find_optimal_resolution(

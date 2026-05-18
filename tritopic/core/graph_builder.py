@@ -44,6 +44,7 @@ class GraphBuilder:
         graph_type: Literal["knn", "mutual_knn", "snn", "hybrid"] = "hybrid",
         snn_weight: float = 0.5,
         language: str = "english",
+        n_jobs: int = -1,
     ):
         from tritopic.utils.stopwords import get_stopwords
 
@@ -52,6 +53,7 @@ class GraphBuilder:
         self.graph_type = graph_type
         self.snn_weight = snn_weight
         self.language = language
+        self.n_jobs = n_jobs
 
         self._tfidf_vectorizer = TfidfVectorizer(
             max_features=10000,
@@ -78,6 +80,7 @@ class GraphBuilder:
             n_neighbors=min(k + 1, n_samples),
             metric=self.metric,
             algorithm="auto",
+            n_jobs=self.n_jobs,
         )
         nn.fit(embeddings)
         distances, indices = nn.kneighbors(embeddings)
@@ -208,32 +211,31 @@ class GraphBuilder:
                 n_neighbors=min(k + 1, n_samples),
                 metric=self.metric,
                 algorithm="auto",
+                n_jobs=self.n_jobs,
             )
             nn.fit(embeddings)
             _, indices = nn.kneighbors(embeddings)
 
-        # Build neighbor sets (exclude self at index 0)
-        neighbor_sets = [set(indices[i][1:]) for i in range(n_samples)]
+        # Vectorized SNN: build binary membership matrix M (n_samples × n_samples)
+        # where M[i, j] = 1 iff j is a kNN of i (excluding self at col 0).
+        # Shared neighbor count: (M @ M.T)[i, j] = |N(i) ∩ N(j)|.
+        k_actual = indices.shape[1] - 1
+        row_idx = np.repeat(np.arange(n_samples), k_actual)
+        col_idx = indices[:, 1:].ravel()
+        M = csr_matrix(
+            (np.ones(len(row_idx), dtype=np.float32), (row_idx, col_idx)),
+            shape=(n_samples, n_samples),
+        )
+        snn = M.dot(M.T) / k_actual  # shared-neighbor fraction in [0, 1]
+        snn.setdiag(0)
+        snn.eliminate_zeros()
 
-        # Collect all unique kNN-connected pairs (union of both directions)
-        seen_pairs: set[tuple[int, int]] = set()
-        for i in range(n_samples):
-            for j in neighbor_sets[i]:
-                pair = (min(i, j), max(i, j))
-                seen_pairs.add(pair)
+        # Restrict to pairs that are kNN-connected in at least one direction
+        knn_union = (M + M.T)
+        knn_union.data[:] = 1.0
+        adjacency = snn.multiply(knn_union)
 
-        # Compute SNN: edge weight = |N(i) ∩ N(j)| for each unique pair
-        rows, cols, weights = [], [], []
-        for i, j in seen_pairs:
-            shared = len(neighbor_sets[i] & neighbor_sets[j])
-            if shared > 0:
-                weight = shared / k
-                rows.extend([i, j])
-                cols.extend([j, i])
-                weights.extend([weight, weight])
-
-        adjacency = csr_matrix((weights, (rows, cols)), shape=(n_samples, n_samples))
-        return adjacency
+        return adjacency.tocsr()
     
     def build_hybrid_graph(
         self,
@@ -329,6 +331,7 @@ class GraphBuilder:
             n_neighbors=min(k + 1, n_samples),
             metric="cosine",
             algorithm="brute",
+            n_jobs=self.n_jobs,
         )
         nn.fit(tfidf_matrix)
         distances, indices = nn.kneighbors(tfidf_matrix)
@@ -523,26 +526,16 @@ class GraphBuilder:
                 metadata_graph = metadata_graph / metadata_graph.max()
             combined_adj = combined_adj + active_weights["metadata"] * metadata_graph
         
-        # Convert to igraph
+        # Convert to igraph — combined_adj is symmetric, so take upper triangle
+        # to avoid duplicate edges without a Python-level dict loop.
         combined_adj = combined_adj.tocoo()
-        
-        edges = list(zip(combined_adj.row, combined_adj.col))
-        weights_list = combined_adj.data.tolist()
-        
-        # Remove duplicate edges (keep max weight)
-        edge_weights = {}
-        for (i, j), w in zip(edges, weights_list):
-            key = (min(i, j), max(i, j))
-            if key not in edge_weights or w > edge_weights[key]:
-                edge_weights[key] = w
-        
-        edges = list(edge_weights.keys())
-        weights_list = list(edge_weights.values())
-        
-        # Create graph
+        mask = combined_adj.row < combined_adj.col
+        edges = list(zip(combined_adj.row[mask].tolist(), combined_adj.col[mask].tolist()))
+        weights_list = combined_adj.data[mask].tolist()
+
         graph = ig.Graph(n=n_samples, edges=edges, directed=False)
         graph.es["weight"] = weights_list
-        
+
         return graph
     
     def get_feature_names(self) -> list[str]:

@@ -316,6 +316,7 @@ config = TriTopicConfig(
     random_state=42,
     verbose=True,
     low_memory=False,                      # see "Memory Optimization" section
+    n_jobs=-1,                             # parallelism: -1 = all cores (Leiden runs, kNN, ARI)
 )
 
 model = TriTopic(config=config)
@@ -420,7 +421,7 @@ pip install tritopic[legacy-consensus]
 
 ### What does `low_memory=True` still do?
 
-In **graph mode** (default), `low_memory` only affects internal dtype choices and lexical-graph caching — the big win is already free.
+In **graph mode** (default), `low_memory` only affects internal dtype choices (float32 vs float64 in the co-occurrence matrix) — the big win is already free.
 
 In **hierarchical mode**, `low_memory=True` keeps the co-occurrence sparse and builds the condensed distance vector directly from it, saving ~7-20× on peak RAM versus the dense path. Same math, same topics, same `random_state`.
 

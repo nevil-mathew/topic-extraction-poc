@@ -123,6 +123,9 @@ class TriTopicConfig:
     # Robust in [0.3, 0.8] per Lancichinetti & Fortunato (Sci. Rep. 2012).
     consensus_threshold_tau: float = 0.5
 
+    # Parallelism: -1 uses all available cores (joblib / sklearn convention).
+    n_jobs: int = -1
+
 
 class TriTopic:
     """
@@ -241,6 +244,7 @@ class TriTopic:
             graph_type=self.config.graph_type,
             snn_weight=self.config.snn_weight,
             language=self.config.language,
+            n_jobs=self.config.n_jobs,
         )
         self._clusterer = ConsensusLeiden(
             resolution=self.config.resolution,
@@ -249,6 +253,7 @@ class TriTopic:
             low_memory=self.config.low_memory,
             consensus_method=self.config.consensus_method,
             consensus_threshold_tau=self.config.consensus_threshold_tau,
+            n_jobs=self.config.n_jobs,
         )
         self._keyword_extractor = KeywordExtractor(
             method=self.config.keyword_method,
@@ -470,10 +475,11 @@ class TriTopic:
                 precomputed_lexical_adj=precomputed_lexical_adj,
             )
 
-            # Cluster
+            # Cluster — skip stability during refinement; computed once after loop
             self.labels_ = self._clusterer.fit_predict(
                 self.graph_,
                 min_cluster_size=self.config.min_cluster_size,
+                compute_stability=False,
             )
 
             n_topics_found = len(np.unique(self.labels_[self.labels_ != -1]))
@@ -520,6 +526,9 @@ class TriTopic:
         # Update reduced embeddings to match final refined state
         if current_reduced is not None:
             self.reduced_embeddings_ = current_reduced
+
+        # Compute stability once against the final iteration's partitions
+        self._clusterer.stability_score_ = self._clusterer._compute_stability()
 
     def _auto_resolve_topic_count(
         self,
