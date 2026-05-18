@@ -289,6 +289,32 @@ class EmbeddingEngine:
         if self._is_instructor and instruction:
             documents = [[instruction, doc] for doc in documents]
 
+        # Multi-GPU path: only when >1 CUDA device is available and the
+        # corpus is large enough to amortize worker-spawn overhead (~5–10s).
+        # Falls through to single-device encode() for CPU or single-GPU.
+        try:
+            import torch
+            use_multi_gpu = (
+                torch.cuda.is_available()
+                and torch.cuda.device_count() > 1
+                and len(documents) > 500
+                and not self._is_instructor
+            )
+        except ImportError:
+            use_multi_gpu = False
+
+        if use_multi_gpu:
+            pool = self._model.start_multi_process_pool()
+            try:
+                return self._model.encode_multi_process(
+                    documents,
+                    pool,
+                    batch_size=self.batch_size,
+                    normalize_embeddings=normalize,
+                )
+            finally:
+                self._model.stop_multi_process_pool(pool)
+
         return self._model.encode(
             documents,
             batch_size=self.batch_size,
