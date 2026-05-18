@@ -26,7 +26,7 @@ from tritopic.utils.metrics import compute_coherence, compute_diversity, compute
 @dataclass
 class TopicInfo:
     """Container for topic information."""
-    
+
     topic_id: int
     size: int
     keywords: list[str]
@@ -36,6 +36,22 @@ class TopicInfo:
     description: str | None = None
     centroid: np.ndarray | None = None
     coherence: float | None = None
+
+
+@dataclass
+class ReportTheme:
+    """A high-level meta-theme synthesized from one or more topics.
+
+    Produced by :meth:`TriTopic.generate_report_themes` for inclusion in a
+    qualitative research report.
+    """
+
+    theme_id: int                       # 1-indexed for human readability
+    title: str                          # 5-8 word evocative title
+    narrative: str                      # 4-6 sentence paragraph
+    topic_ids: list[int]                # constituent topic IDs
+    total_size: int                     # sum of constituent topic sizes
+    keywords: list[str]                 # aggregated top keywords
 
 
 @dataclass
@@ -275,6 +291,7 @@ class TriTopic:
         self.topic_embeddings_: np.ndarray | None = None
         self.documents_: list[str] | None = None
         self.hierarchy_: TopicHierarchy | None = None
+        self.report_themes_: list[ReportTheme] | None = None
         self._is_fitted: bool = False
         self._iteration_history: list[dict] = []
         self._dim_reducer: Any | None = None
@@ -1545,45 +1562,521 @@ class TriTopic:
         self,
         labeler: "LLMLabeler",
         topics: list[int] | None = None,
+        dedup: bool = True,
+        dedup_passes: int = 1,
     ) -> None:
         """
         Generate labels for topics using an LLM.
-        
+
+        Each topic is labeled with awareness of all topics labeled before it
+        in the same run, so the LLM avoids producing duplicate or
+        near-duplicate labels. After the main pass, an optional cleanup pass
+        re-labels any remaining exact-duplicate or shared-prefix collisions
+        with explicit "make these distinct" instructions.
+
         Parameters
         ----------
         labeler : LLMLabeler
-            Configured LLM labeler instance.
+            Configured LLM labeler. Use ``style="theme"`` for report-quality
+            narrative labels.
         topics : list[int], optional
-            Specific topics to label. If None, labels all.
+            Specific topics to label. If None, labels all non-outlier topics.
+        dedup : bool
+            Pass already-assigned labels to each LLM call. Default True.
+        dedup_passes : int
+            Number of cleanup passes after the main loop. Default 1.
         """
         if not self._is_fitted:
             raise ValueError("Model not fitted. Call fit() first.")
-        
+
         target_topics = topics or [t.topic_id for t in self.topics_ if t.topic_id != -1]
-        
         n_total = len(target_topics)
+        existing: list[dict] = []
+
         for i, topic_id in enumerate(tqdm(target_topics, desc="Generating labels", disable=not self.config.verbose), 1):
             topic = self.get_topic(topic_id)
             if topic is None:
                 continue
 
-            # Get representative docs
             rep_docs = self.get_representative_docs(topic_id, n_docs=labeler.n_docs)
             doc_texts = [doc for _, doc in rep_docs]
 
-            # Generate label
             label, description = labeler.generate_label(
                 keywords=topic.keywords,
                 representative_docs=doc_texts,
+                existing_labels=existing if dedup else None,
             )
 
             topic.label = label
             topic.description = description
+            if dedup:
+                existing.append({"label": label, "keywords": topic.keywords})
 
             if labeler.verbose:
                 kw_hint = ", ".join(topic.keywords[:3])
                 print(f"[{i}/{n_total}] Topic {topic_id} ({kw_hint}) → {label}")
-    
+
+        # Cleanup pass: regenerate exact-duplicate / shared-prefix labels
+        for _ in range(dedup_passes):
+            collisions = self._find_label_collisions(target_topics)
+            if not collisions:
+                break
+            self._resolve_label_collisions(labeler, collisions)
+
+    def _find_label_collisions(self, target_topic_ids: list[int]) -> list[list[int]]:
+        """Group topics that share an exact or near-duplicate label.
+
+        Two labels collide if they are identical OR share the same first three
+        words (case-insensitive). Returns a list of groups, each containing
+        2+ topic IDs.
+        """
+        by_label: dict[str, list[int]] = {}
+        by_prefix: dict[str, list[int]] = {}
+        for tid in target_topic_ids:
+            topic = self.get_topic(tid)
+            if topic is None or not topic.label:
+                continue
+            label = topic.label.strip()
+            by_label.setdefault(label.lower(), []).append(tid)
+            prefix = " ".join(label.lower().split()[:3])
+            by_prefix.setdefault(prefix, []).append(tid)
+
+        # Use prefix groups (they subsume exact duplicates) of size >= 2
+        return [ids for ids in by_prefix.values() if len(ids) >= 2]
+
+    def _resolve_label_collisions(
+        self, labeler: "LLMLabeler", collisions: list[list[int]]
+    ) -> None:
+        """Re-label each colliding group with explicit "make distinct" context."""
+        for group in collisions:
+            # Build a context that tells each member about its siblings
+            sibling_summaries: list[dict] = []
+            for tid in group:
+                t = self.get_topic(tid)
+                if t is None:
+                    continue
+                sibling_summaries.append({"label": t.label or "", "keywords": t.keywords})
+
+            for tid in group:
+                topic = self.get_topic(tid)
+                if topic is None:
+                    continue
+                # "existing" = the sibling labels (excluding self) plus everyone else
+                others = [s for s in sibling_summaries if s["keywords"] is not topic.keywords]
+                rep_docs = self.get_representative_docs(tid, n_docs=labeler.n_docs)
+                doc_texts = [doc for _, doc in rep_docs]
+                label, description = labeler.generate_label(
+                    keywords=topic.keywords,
+                    representative_docs=doc_texts,
+                    existing_labels=others,
+                )
+                topic.label = label
+                topic.description = description
+                if labeler.verbose:
+                    print(f"  [dedup] Topic {tid} → {label}")
+
+    # ------------------------------------------------------------------
+    # Report meta-themes
+    # ------------------------------------------------------------------
+
+    def generate_report_themes(
+        self,
+        labeler: "LLMLabeler",
+        n_themes: int | None = None,
+        n_docs_per_theme: int = 12,
+    ) -> list[ReportTheme]:
+        """Synthesize 5-12 high-level meta-themes from all per-topic labels.
+
+        Designed to produce a small set of report-ready narrative themes (in
+        the style of qualitative research reports). Recommended workflow:
+
+            1. Call :meth:`generate_labels` first with ``labeler.style="theme"``
+               so each topic has an evocative title + narrative description.
+            2. Call this method to consolidate them into a handful of
+               cross-cutting meta-themes for the final report.
+            3. Call :meth:`export_report` to write the report to a file.
+
+        The method uses two LLM stages:
+
+            * **Proposer**: sees the title, narrative excerpt, and top
+              keywords of every non-outlier topic and proposes N meta-themes
+              with explicit topic assignments.
+            * **Narrative writer** (one call per meta-theme): given the
+              meta-theme title and constituent topics, writes the final
+              report-style narrative quoting underlying documents.
+
+        Parameters
+        ----------
+        labeler : LLMLabeler
+            Labeler used to call the LLM. ``style`` is irrelevant here — the
+            method overrides the prompts for both stages.
+        n_themes : int, optional
+            Target number of meta-themes. If None (default), the LLM is
+            instructed to choose the natural number of meta-themes for the
+            data, typically 5-12. When set, the LLM is asked to hit that
+            number ±2.
+        n_docs_per_theme : int
+            Number of representative documents (sampled proportionally
+            across constituent topics) passed to the narrative writer.
+
+        Returns
+        -------
+        list[ReportTheme]
+            Stored on ``self.report_themes_``.
+        """
+        if not self._is_fitted:
+            raise ValueError("Model not fitted. Call fit() first.")
+
+        topics = [t for t in self.topics_ if t.topic_id != -1]
+        if not topics:
+            raise ValueError("No topics available to synthesize from.")
+        if any(t.label is None for t in topics):
+            raise ValueError(
+                "All topics must have labels. Call generate_labels(labeler) "
+                "before generate_report_themes()."
+            )
+
+        if self.config.verbose:
+            target = f"~{n_themes}" if n_themes is not None else "an LLM-chosen count of"
+            print(f"   > Proposing {target} meta-themes from {len(topics)} topics...")
+        proposals = self._propose_meta_themes(labeler, topics, n_themes)
+
+        if self.config.verbose:
+            print(f"   > Writing narratives for {len(proposals)} meta-themes...")
+        themes: list[ReportTheme] = []
+        for idx, prop in enumerate(tqdm(proposals, desc="Theme narratives", disable=not self.config.verbose), 1):
+            theme = self._write_meta_theme_narrative(
+                labeler, prop, theme_id=idx, n_docs=n_docs_per_theme
+            )
+            if theme is not None:
+                themes.append(theme)
+
+        self.report_themes_ = themes
+        return themes
+
+    def _propose_meta_themes(
+        self, labeler: "LLMLabeler", topics: list[TopicInfo], n_themes: int | None
+    ) -> list[dict]:
+        """Ask the LLM to group all topics into meta-themes.
+
+        If ``n_themes`` is None the LLM chooses the natural number; otherwise
+        it is given a target ±2. Returns ``[{"title": str, "topic_ids": list[int]}, ...]``.
+        """
+        import re
+
+        # Compact per-topic summary block
+        lines = []
+        for t in topics:
+            kws = ", ".join(t.keywords[:6])
+            desc = (t.description or "").strip().replace("\n", " ")
+            # First sentence of the narrative as the essence
+            first_sentence = re.split(r"(?<=[.!?])\s+", desc, maxsplit=1)[0]
+            first_sentence = first_sentence[:240]
+            lines.append(
+                f"  Topic {t.topic_id} (n={t.size}) — {t.label}\n"
+                f"    keywords: {kws}\n"
+                f"    essence:  {first_sentence}"
+            )
+        topics_block = "\n".join(lines)
+
+        hint = labeler.domain_hint or ""
+        domain_line = f"\nThis is a qualitative study about {hint}.\n" if hint else ""
+
+        system_prompt = (
+            "You are a senior qualitative research analyst. You consolidate fine-grained "
+            "topic-model output into a small number of EMERGING THEMES suitable for the "
+            "Findings section of a research report. You always respond with valid JSON "
+            "and nothing else."
+        )
+
+        if n_themes is None:
+            count_instruction = (
+                "Choose the NATURAL number of meta-themes for this data, typically "
+                "between 5 and 12. Use exactly as many as the data warrants — do not "
+                "pad to reach a round number, and do not force consolidation if the "
+                "data clearly spans more distinct patterns. Quality of grouping "
+                "matters more than count."
+            )
+            intro = "Group them into the natural set of EMERGING META-THEMES for a research report."
+        else:
+            count_instruction = (
+                f"Produce approximately {n_themes} meta-themes (±2 acceptable if the "
+                f"data clearly demands it). Do not stretch or compress beyond that range."
+            )
+            intro = f"Group them into approximately {n_themes} EMERGING META-THEMES for a research report."
+
+        user_prompt = f"""Below is the full list of topics from a topic model. {intro}
+{domain_line}
+TOPICS:
+{topics_block}
+
+RULES:
+- {count_instruction}
+- Every topic ID must be assigned to exactly one meta-theme. Do not drop any.
+- A meta-theme should unify topics that share a deeper human concern, mechanism, or pattern — not just surface keyword overlap.
+- Each meta-theme title must be 5-8 words, title case, EVOCATIVE (name the lived experience, not a generic category).
+- Never use the bare phrases "Systemic Barriers", "Structural Barriers", "Geographic Barriers", "Educational Access" — they are too generic. Name the specific mechanism.
+- Order the meta-themes by overall importance (largest constituent size first, ties broken by narrative centrality).
+
+OUTPUT FORMAT (JSON, no other text):
+{{
+  "themes": [
+    {{"title": "Evocative Meta-Theme Title", "topic_ids": [0, 3, 6, 10]}},
+    {{"title": "Another Meta-Theme",         "topic_ids": [1, 2, 8]}}
+  ]
+}}"""
+
+        # Allow extra headroom — the response can be long for many topics
+        raw = labeler.call_raw(system_prompt, user_prompt, max_tokens=4000)
+
+        # Parse JSON robustly
+        proposals = self._parse_proposer_response(raw, valid_topic_ids={t.topic_id for t in topics})
+        if not proposals:
+            # Fallback: one meta-theme per topic (degenerate but safe)
+            warnings.warn(
+                "Meta-theme proposer returned no valid groupings. Falling back to "
+                "one-to-one topics → meta-themes."
+            )
+            proposals = [{"title": t.label or f"Topic {t.topic_id}", "topic_ids": [t.topic_id]} for t in topics]
+        return proposals
+
+    def _parse_proposer_response(self, raw: str, valid_topic_ids: set[int]) -> list[dict]:
+        """Extract themes from the proposer JSON, dropping invalid IDs."""
+        import json, re
+
+        proposals: list[dict] = []
+        try:
+            start = raw.find("{")
+            end = raw.rfind("}") + 1
+            if start == -1 or end <= start:
+                return []
+            data = json.loads(raw[start:end])
+            for theme in data.get("themes", []):
+                title = str(theme.get("title", "")).strip()
+                ids_raw = theme.get("topic_ids", []) or []
+                ids = [int(i) for i in ids_raw if int(i) in valid_topic_ids]
+                if title and ids:
+                    proposals.append({"title": title, "topic_ids": ids})
+        except (json.JSONDecodeError, ValueError, TypeError):
+            # Best-effort regex fallback for slightly malformed JSON
+            blocks = re.findall(r'"title"\s*:\s*"([^"]+)"\s*,\s*"topic_ids"\s*:\s*\[([0-9,\s]+)\]', raw)
+            for title, ids_str in blocks:
+                ids = [int(x.strip()) for x in ids_str.split(",") if x.strip().isdigit()]
+                ids = [i for i in ids if i in valid_topic_ids]
+                if title.strip() and ids:
+                    proposals.append({"title": title.strip(), "topic_ids": ids})
+
+        # Ensure every topic is assigned (assign orphans to the largest meta-theme)
+        assigned = {tid for p in proposals for tid in p["topic_ids"]}
+        orphans = valid_topic_ids - assigned
+        if orphans and proposals:
+            largest = max(proposals, key=lambda p: len(p["topic_ids"]))
+            largest["topic_ids"].extend(sorted(orphans))
+        return proposals
+
+    def _write_meta_theme_narrative(
+        self,
+        labeler: "LLMLabeler",
+        proposal: dict,
+        theme_id: int,
+        n_docs: int,
+    ) -> ReportTheme | None:
+        """Generate the report-style narrative paragraph for one meta-theme."""
+        topic_ids: list[int] = proposal["topic_ids"]
+        member_topics = [self.get_topic(tid) for tid in topic_ids]
+        member_topics = [t for t in member_topics if t is not None]
+        if not member_topics:
+            return None
+
+        total_size = sum(t.size for t in member_topics)
+
+        # Sample representative docs proportionally to topic size
+        docs_per_topic = max(1, n_docs // max(len(member_topics), 1))
+        doc_texts: list[str] = []
+        for t in member_topics:
+            rep = self.get_representative_docs(t.topic_id, n_docs=docs_per_topic)
+            doc_texts.extend(doc for _, doc in rep)
+        doc_texts = doc_texts[:n_docs]
+
+        # Aggregate keywords (preserve order, dedupe)
+        seen: set[str] = set()
+        agg_keywords: list[str] = []
+        for t in member_topics:
+            for kw in t.keywords[:8]:
+                if kw not in seen:
+                    seen.add(kw)
+                    agg_keywords.append(kw)
+                if len(agg_keywords) >= 20:
+                    break
+            if len(agg_keywords) >= 20:
+                break
+
+        # Member topic summaries for context
+        summaries = []
+        for t in member_topics:
+            summaries.append(
+                f"  - Topic {t.topic_id} (n={t.size}, '{t.label}'): "
+                f"{(t.description or '').strip()[:300]}"
+            )
+        members_block = "\n".join(summaries)
+
+        # Docs block
+        docs_text = ""
+        for i, doc in enumerate(doc_texts, 1):
+            truncated = doc[:1200] + "..." if len(doc) > 1200 else doc
+            docs_text += f"\nDocument {i}: {truncated}\n"
+
+        hint = labeler.domain_hint or ""
+        domain_line = f"This is a qualitative study about {hint}." if hint else ""
+
+        system_prompt = (
+            "You are a qualitative research analyst writing the Findings section of a "
+            "report. You write evocative, concrete, narrative themes that quote "
+            "participants and synthesize what the data really means. You always "
+            "respond with valid JSON and nothing else."
+        )
+
+        user_prompt = f"""You are writing one EMERGING THEME for a qualitative research report. The theme's title has already been chosen. Your job is to write the narrative paragraph.
+
+{domain_line}
+
+THEME TITLE (already chosen — do not change):
+{proposal['title']}
+
+This meta-theme synthesizes {len(member_topics)} fine-grained topics covering {total_size} documents:
+{members_block}
+
+AGGREGATED TOP KEYWORDS:
+{', '.join(agg_keywords)}
+
+SAMPLE DOCUMENTS:
+{docs_text}
+
+YOUR "narrative" MUST:
+- Be 4-6 sentences (60-120 words).
+- Open with a concrete observation, not an abstract claim.
+- Include at least one short quoted phrase from the documents (use single quotes around the quoted phrase, e.g., parents called the school 'too far', families said admission was 'denied without Aadhar').
+- Synthesize the shared pattern across the constituent topics — not list them.
+- End with a sentence that names the underlying meaning or why this matters.
+- Be written in plain English, third person.
+- Do NOT repeat the theme title in the narrative.
+
+REFERENCE STYLE (do not copy content, only match register):
+
+  Title: "A Festive and Welcoming School Environment"
+  Narrative: "The PTM was often described as a 'celebration' or a 'festival.' Schools were decorated with student artwork, crafts, and photo booths, creating a vibrant atmosphere. Students actively participated in welcoming guests, singing songs, and organizing events — making the PTM feel like a community-led initiative. This joyful environment made parents feel proud and included."
+
+Respond ONLY with this exact JSON, no other text:
+{{"narrative": "Your 4-6 sentence paragraph here."}}"""
+
+        raw = labeler.call_raw(system_prompt, user_prompt, max_tokens=1200)
+        narrative = self._parse_narrative_response(raw)
+
+        return ReportTheme(
+            theme_id=theme_id,
+            title=proposal["title"].strip(),
+            narrative=narrative,
+            topic_ids=[t.topic_id for t in member_topics],
+            total_size=total_size,
+            keywords=agg_keywords,
+        )
+
+    def _parse_narrative_response(self, raw: str) -> str:
+        """Extract the narrative field from the writer's JSON output."""
+        import json, re
+
+        try:
+            start = raw.find("{")
+            end = raw.rfind("}") + 1
+            if start != -1 and end > start:
+                data = json.loads(raw[start:end])
+                return str(data.get("narrative", "")).strip()
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+        m = re.search(r'"narrative"\s*:\s*"([^"]*)"', raw)
+        if m:
+            return m.group(1).strip()
+        # Last-resort: take the longest line
+        lines = [l.strip() for l in raw.splitlines() if l.strip()]
+        return max(lines, key=len) if lines else ""
+
+    def regenerate_theme(
+        self,
+        labeler: "LLMLabeler",
+        theme_id: int,
+        new_topic_ids: list[int] | None = None,
+        n_docs: int = 12,
+    ) -> ReportTheme:
+        """Regenerate one meta-theme's narrative, optionally moving topics in/out.
+
+        Use after :meth:`generate_report_themes` if a particular theme needs
+        editing — either to swap its constituent topics or simply to resample
+        a new narrative.
+        """
+        if self.report_themes_ is None:
+            raise ValueError("Call generate_report_themes(labeler) first.")
+        target = next((t for t in self.report_themes_ if t.theme_id == theme_id), None)
+        if target is None:
+            raise ValueError(f"No report theme with id={theme_id}.")
+        topic_ids = new_topic_ids if new_topic_ids is not None else target.topic_ids
+        proposal = {"title": target.title, "topic_ids": topic_ids}
+        new = self._write_meta_theme_narrative(labeler, proposal, theme_id=theme_id, n_docs=n_docs)
+        if new is None:
+            raise ValueError("Regeneration failed.")
+        idx = self.report_themes_.index(target)
+        self.report_themes_[idx] = new
+        return new
+
+    def export_report(self, path: str, include_appendix: bool = True) -> None:
+        """Write the meta-themes to a Markdown report file.
+
+        Format matches the qualitative-research style: a header section,
+        then each meta-theme as a numbered H2 with its narrative paragraph.
+        With ``include_appendix=True``, an appendix lists the constituent
+        topic IDs and sizes under each theme for traceability.
+        """
+        if self.report_themes_ is None:
+            raise ValueError(
+                "No report themes available. Call generate_report_themes(labeler) first."
+            )
+
+        lines: list[str] = []
+        lines.append("# Emerging Themes\n")
+        lines.append(
+            "The stories collected through this study surfaced recurring patterns. "
+            "These themes synthesize the most frequent and meaningful signals across "
+            "all collected documents.\n"
+        )
+
+        for theme in self.report_themes_:
+            lines.append(f"## {theme.theme_id}. {theme.title}\n")
+            lines.append(theme.narrative.strip() + "\n")
+
+        if include_appendix:
+            lines.append("\n---\n")
+            lines.append("## Appendix: Constituent Topics\n")
+            lines.append(
+                "Each meta-theme is synthesized from the following fine-grained "
+                "topics produced by the topic model.\n"
+            )
+            for theme in self.report_themes_:
+                lines.append(
+                    f"\n**{theme.theme_id}. {theme.title}** "
+                    f"({len(theme.topic_ids)} topics, {theme.total_size} documents)\n"
+                )
+                for tid in theme.topic_ids:
+                    t = self.get_topic(tid)
+                    if t is None:
+                        continue
+                    label = t.label or f"Topic {tid}"
+                    lines.append(f"- Topic {tid} (n={t.size}): {label}")
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        if self.config.verbose:
+            print(f"   > Report written to {path}")
+
     def visualize(
         self,
         method: Literal["umap", "pacmap"] = "umap",

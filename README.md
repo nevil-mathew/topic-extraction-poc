@@ -774,6 +774,140 @@ model.generate_labels(labeler)
 model.generate_labels(labeler, topics=[0, 3, 5])
 ```
 
+### Two label styles: `short` vs `theme`
+
+`LLMLabeler` now accepts a `style` parameter that controls how rich the output is:
+
+| Style | Title length | Description length | Use for |
+|-------|--------------|-------------------|---------|
+| `"short"` *(default, backward-compatible)* | 3–7 words | 1–2 sentences | dashboards, charts, CSV exports |
+| `"theme"` | 5–8 words, evocative | 4–6 sentence narrative paragraph with quoted phrases | qualitative research reports |
+
+```python
+labeler = LLMLabeler(
+    provider="anthropic",
+    api_key="sk-ant-...",
+    style="theme",                                # report-quality output
+    domain_hint="education barriers in rural India",  # anchors register
+)
+model.generate_labels(labeler)
+```
+
+The theme style automatically:
+- Passes **15 keywords** (instead of 10) and **8 representative docs** of up to 1200 chars (instead of 5 of 500 chars) for richer context.
+- Uses a longer `max_tokens` budget (900) so the narrative isn't truncated.
+- Few-shots the prompt with the qualitative-report register so output reads like a Findings section.
+
+### Automatic duplicate-label prevention
+
+Both styles now run with **sequential dedup context** by default: each topic is labeled with awareness of all topics labeled before it in the same run, and the LLM is explicitly instructed to name a distinguishing mechanism if its cluster overlaps thematically with an earlier one.
+
+After the main loop, a **cleanup pass** finds any remaining exact-duplicate or shared-prefix labels (e.g., two topics both labeled "Systemic Barriers to Educational Access") and regenerates them with explicit "make these distinct" instructions.
+
+```python
+model.generate_labels(labeler)                  # dedup on by default
+model.generate_labels(labeler, dedup=False)     # opt out (legacy behavior)
+model.generate_labels(labeler, dedup_passes=2)  # extra cleanup pass for tricky datasets
+```
+
+### Response caching
+
+`LLMLabeler` caches each response by prompt hash, so re-running `generate_labels` (or the cleanup pass) does not re-pay for identical calls. Disable with `cache=False`.
+
+---
+
+## Report Themes (qualitative research output)
+
+For deliverables like a Findings section in a research report, an 85-topic catalog is too granular. TriTopic can synthesize all per-topic labels into a small number of **emerging meta-themes** — each a 5–8 word evocative title plus a 4–6 sentence narrative paragraph that quotes participants and names the underlying pattern.
+
+### End-to-end workflow
+
+```python
+from tritopic import TriTopic, TriTopicConfig, LLMLabeler
+
+# 1. Fit the model (standard)
+model = TriTopic(
+    n_neighbors=10,
+    config=TriTopicConfig(
+        embedding_model="BAAI/bge-m3",
+        consensus_method="graph",
+        resolution=0.75,
+        min_cluster_size=15,
+    ),
+)
+model.fit(documents)
+
+# 2. Generate report-style per-topic themes (the "catalog")
+labeler = LLMLabeler(
+    provider="anthropic",
+    api_key="sk-ant-...",
+    style="theme",
+    domain_hint="education barriers in rural India",
+)
+model.generate_labels(labeler)
+
+# 3. Synthesize all 80+ topics into 5-12 meta-themes (the "report")
+#    Omit n_themes to let the LLM choose the natural count, or pass an int as a target.
+model.generate_report_themes(labeler)
+# model.generate_report_themes(labeler, n_themes=8)   # if you want a specific count
+
+# 4. Write the final Markdown report
+model.export_report("findings.md")
+```
+
+### What `generate_report_themes` does
+
+Two LLM stages:
+
+1. **Proposer call** — sees the title, narrative excerpt, and top keywords of every non-outlier topic in one request. Returns ~`n_themes` groupings, each `{title, topic_ids[]}`. Every topic must be assigned to exactly one meta-theme. The proposer may merge or split groups based on narrative content, not just embedding distance.
+2. **Narrative writer** — one call per meta-theme. Given the title and constituent topics, writes the report paragraph using docs sampled proportionally across all member topics, aggregated keywords, and the existing topic narratives as context.
+
+Cost is small: typically 1 proposer call (~5K input tokens) plus N narrative calls (~3K each). With Claude Haiku, a full report of 8 meta-themes is well under $0.20.
+
+### Sample output (`findings.md`)
+
+```markdown
+# Emerging Themes
+
+## 1. Aadhar Card as Gatekeeper to Schooling
+Parents repeatedly described being turned away from admission because their
+child lacked an Aadhar card. The phrase 'no card, no admission' recurred
+across both rural and peri-urban accounts. Many families had been waiting
+months for documentation, while their children remained out of school...
+
+## 2. Distance to Anganwadi Centre Disrupts Early Learning
+Mothers said the nearest centre was 'too far' for small children to walk
+unaccompanied, and described carrying younger siblings on the route. Where
+centres existed, irregular hours and supply gaps further eroded attendance...
+```
+
+### Editing themes after the fact
+
+```python
+# Resample the narrative for theme 3 (no topic changes)
+model.regenerate_theme(labeler, theme_id=3)
+
+# Move topics 12 and 17 into theme 3 and resample
+model.regenerate_theme(labeler, theme_id=3, new_topic_ids=[5, 8, 12, 17])
+```
+
+### Programmatic access
+
+```python
+for theme in model.report_themes_:
+    print(f"{theme.theme_id}. {theme.title}")
+    print(f"   ({len(theme.topic_ids)} topics, {theme.total_size} docs)")
+    print(f"   {theme.narrative}")
+```
+
+### When to use what
+
+| Use case | Method | Output |
+|----------|--------|--------|
+| Topic catalog for analysts / CSV / charts | `generate_labels(labeler)` with `style="short"` | 85 topics × 5-word label + 1-2 sentence description |
+| Rich per-topic catalog for browsing | `generate_labels(labeler)` with `style="theme"` | 85 topics × evocative title + narrative paragraph |
+| Findings section of a research report | `generate_report_themes(labeler)` + `export_report()` | 6–10 meta-themes × narrative paragraph, plus appendix linking back to constituent topics |
+
 If the LLM API call fails, the labeler automatically falls back to a keyword-based label (with exponential-backoff retry before giving up).
 
 ---
@@ -1113,7 +1247,10 @@ The main model class. Follows the scikit-learn fit/transform pattern.
 | `get_topic_info()` | DataFrame with Topic, Size, Keywords, Label, Coherence columns. |
 | `get_topic(topic_id)` | Get `TopicInfo` for a specific topic. |
 | `get_representative_docs(topic_id, n_docs?)` | Get `(index, text)` tuples for a topic's most central documents. |
-| `generate_labels(labeler, topics?)` | Generate LLM labels for topics. |
+| `generate_labels(labeler, topics?, dedup?, dedup_passes?)` | Generate LLM labels for topics. Dedup is on by default. |
+| `generate_report_themes(labeler, n_themes?, n_docs_per_theme?)` | Synthesize per-topic labels into report-style meta-themes. If `n_themes` is omitted the LLM chooses the natural count (typically 5–12); pass an int to target a specific count ±2. Stores on `model.report_themes_`. |
+| `regenerate_theme(labeler, theme_id, new_topic_ids?, n_docs?)` | Resample a single meta-theme's narrative, optionally moving topics in/out. |
+| `export_report(path, include_appendix?)` | Write meta-themes as a Markdown report. |
 | `evaluate()` | Compute coherence, diversity, stability, and outlier ratio. |
 | `visualize(method?, show_outliers?, ...)` | 2D document scatter plot. |
 | `visualize_3d(method?, show_outliers?, ...)` | Interactive 3D document scatter plot. |
