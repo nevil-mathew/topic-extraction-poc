@@ -76,6 +76,11 @@ class EmbeddingEngine:
     batch_delay : float
         Seconds to sleep between API batches. Default: 0.0.
         Set ~4.0 on the Gemini free tier (5–15 RPM limit).
+    prefix : str or None
+        Plain-text prefix prepended to every document before local encoding.
+        Required by some models for best clustering quality, e.g.
+        ``"query: "`` for ``intfloat/multilingual-e5-*`` models.
+        Ignored for API providers.
     """
 
     def __init__(
@@ -90,6 +95,7 @@ class EmbeddingEngine:
         output_dim: int | None = None,
         task_type: str | None = None,
         batch_delay: float = 0.0,
+        prefix: str | None = None,
     ):
         self.model_name = model_name
         self.batch_size = batch_size
@@ -101,6 +107,7 @@ class EmbeddingEngine:
         self.output_dim = output_dim
         self.task_type = task_type
         self.batch_delay = batch_delay
+        self.prefix = prefix
 
         self._model: Any = None    # local SentenceTransformer (lazy)
         self._client: Any = None   # API client (lazy)
@@ -275,6 +282,9 @@ class EmbeddingEngine:
 
         # --- local path (unchanged) ---
         self._load_model()
+
+        if self.prefix:
+            documents = [self.prefix + doc for doc in documents]
 
         if self._is_instructor and instruction:
             documents = [[instruction, doc] for doc in documents]

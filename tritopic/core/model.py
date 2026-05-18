@@ -51,6 +51,7 @@ class TriTopicConfig:
     embedding_output_dim: int | None = None
     embedding_task_type: str | None = None
     embedding_batch_delay: float = 0.0
+    embedding_prefix: str | None = None
     language: str = "english"
     
     # Graph settings
@@ -237,6 +238,7 @@ class TriTopic:
             output_dim=self.config.embedding_output_dim,
             task_type=self.config.embedding_task_type,
             batch_delay=self.config.embedding_batch_delay,
+            prefix=self.config.embedding_prefix,
         )
         self._graph_builder = GraphBuilder(
             n_neighbors=self.config.n_neighbors,
@@ -1920,6 +1922,8 @@ class TriTopic:
             config.embedding_task_type = None
         if not hasattr(config, "embedding_batch_delay"):
             config.embedding_batch_delay = 0.0
+        if not hasattr(config, "embedding_prefix"):
+            config.embedding_prefix = None
 
         model = cls(config=config)
         model.n_topics = state.get("n_topics", "auto")
