@@ -444,15 +444,10 @@ class TriTopic:
             current_reduced = None
         previous_labels = None
 
-        # In low-memory mode, precompute the lexical view once (it is a pure
-        # function of the immutable TF-IDF matrix) instead of rebuilding it
-        # every iteration.  Off by default to preserve original behaviour.
+        # Precompute the lexical graph once — it is a pure function of the
+        # immutable TF-IDF matrix and never changes between iterations.
         precomputed_lexical_adj = None
-        if (
-            self.config.low_memory
-            and self.config.use_lexical_view
-            and self.lexical_matrix_ is not None
-        ):
+        if self.config.use_lexical_view and self.lexical_matrix_ is not None:
             precomputed_lexical_adj = self._graph_builder.build_lexical_graph(
                 self.lexical_matrix_
             )
