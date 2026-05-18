@@ -101,6 +101,9 @@ class LLMLabeler:
 
         self._client = None
         self._cache: dict[str, tuple[str, str]] = {} if cache else None
+        # When True, the Google path skips the label/description response_schema
+        # so callers can request arbitrary JSON shapes (e.g. meta-theme proposer).
+        self._raw_mode: bool = False
     
     def _default_model(self) -> str:
         """Get default model for provider."""
@@ -236,11 +239,15 @@ class LLMLabeler:
             if cached:
                 return cached  # type: ignore[return-value]
 
-        # Temporarily swap max_tokens if caller wants more headroom
-        saved = self.max_tokens
+        # Temporarily swap max_tokens if caller wants more headroom,
+        # and disable the Google structured-output schema so the response
+        # can take an arbitrary JSON shape (e.g. {"themes": [...]}).
+        saved_tokens = self.max_tokens
+        saved_raw = self._raw_mode
         try:
             if max_tokens is not None:
                 self.max_tokens = max_tokens
+            self._raw_mode = True
             if self.provider == "anthropic":
                 response = self._call_with_retry(lambda: self._call_anthropic(system_prompt, user_prompt))
             elif self.provider == "google":
@@ -248,7 +255,8 @@ class LLMLabeler:
             else:
                 response = self._call_with_retry(lambda: self._call_openai(system_prompt, user_prompt))
         finally:
-            self.max_tokens = saved
+            self.max_tokens = saved_tokens
+            self._raw_mode = saved_raw
 
         if cache_key is not None:
             self._cache["raw:" + cache_key] = response  # type: ignore[assignment]
@@ -408,15 +416,18 @@ Respond ONLY with this exact JSON format, no other text:
             temperature=self.temperature,
             max_output_tokens=max(self.max_tokens, 1024),
             response_mime_type="application/json",
-            response_schema=types.Schema(
+        )
+        # Only constrain to the label/description schema for standard topic
+        # labeling. Raw callers (e.g. meta-theme proposer) need free-form JSON.
+        if not self._raw_mode:
+            config_kwargs["response_schema"] = types.Schema(
                 type=types.Type.OBJECT,
                 properties={
                     "label": types.Schema(type=types.Type.STRING),
                     "description": types.Schema(type=types.Type.STRING),
                 },
                 required=["label", "description"],
-            ),
-        )
+            )
         if "2.5" in self.model:
             config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
 
